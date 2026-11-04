@@ -1,0 +1,16 @@
+# Public HTTPS entry point. Caddy gets and renews Let's Encrypt certificates automatically.
+# DNS: point chat.<DOMAIN> and cdn.<DOMAIN> at this server (A/AAAA records) before starting.
+
+chat.{$DOMAIN} {
+	# gRPC goes to the server's HTTP/2 "omnibus" port; REST and websockets to the HTTP port.
+	@grpc header Content-Type application/grpc*
+	reverse_proxy @grpc h2c://chat-server:50051
+	reverse_proxy chat-server:8080
+}
+
+# Profile avatars (S3 bucket "cdn"); uploads use signed POST policies issued by the chat server.
+cdn.{$DOMAIN} {
+	reverse_proxy s3:8333 {
+		header_up Host cdn.s3
+	}
+}

@@ -1,0 +1,8 @@
+# Dynamic configuration: feature flags, rate limits, experiments. The server re-reads this file within 10 seconds
+# of a change, no restart needed. Schema: service/src/main/java/org/whispersystems/textsecuregcm/configuration/
+# dynamic/DynamicConfiguration.java. Validate with:
+#   docker compose run --rm --no-deps chat-server check-dynamic-config
+captcha:
+  scoreFloor: 1.0
+grpcAllowList:
+  enableAll: true

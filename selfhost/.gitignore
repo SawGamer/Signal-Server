@@ -1,0 +1,5 @@
+# Generated keys and credentials: never commit these.
+secrets/
+.env
+# Build staging area (./build.sh)
+build/
