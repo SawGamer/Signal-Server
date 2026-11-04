@@ -3,12 +3,15 @@
 Signal's chat server does not send verification SMS itself. It calls a separate, closed-source
 **registration service** over gRPC. This module is an open replacement that implements the same
 contract ([`service/src/main/proto/RegistrationService.proto`](../service/src/main/proto/RegistrationService.proto)),
-so the chat server needs only a small client factory that connects with the shared secret below. That
-factory is not added yet: it can only be compiled once the server's `libsignal` dependency is available.
+so the chat server needs only a small client factory that connects with the shared secret below
+(`registrationService.type: selfHosted`, in `service/.../selfhost/SelfHostedRegistrationServiceClientFactory.java`).
+`../selfhost/docker-compose.yml` wires the two together.
 
 It handles:
 
 - Creating registration sessions, rate-limited per phone number (10 per hour).
+- Sending codes in **Arabic or English**, matching the phone's language (`DEFAULT_LANGUAGE` when it isn't
+  sent). Codes always use Western digits 0-9, so phones can auto-fill them.
 - Sending 6-digit codes by **SMS** or **voice call** through Twilio, with growing resend delays
   (60s → 2m → 5m → 10m, at most 5 SMS and 3 calls per session). As with Signal, a call is only
   offered after an SMS attempt.
@@ -30,7 +33,10 @@ over TLS.
 | `PORT` | no | default `9443` |
 | `SENDER` | no | `log` (default, **development only**: the code is printed to the log) or `twilio` |
 | `APP_NAME` | no | your app's name, used in the SMS text |
-| `SMS_TEMPLATE` | no | default `Your {app} code: {code}\n\nDo not share this code with anyone.` |
+| `DEFAULT_LANGUAGE` | no | `en` (default) or `ar`: used when the phone doesn't send its language |
+| `SMS_TEMPLATE` | no | English text, default `Your {app} code: {code}\n\nDo not share this code with anyone.` |
+| `SMS_TEMPLATE_AR` | no | Arabic text, default `رمز التحقق في {app}: {code}\n\nلا تشارك هذا الرمز مع أي شخص.` |
+| `VOICE_AR`, `VOICE_AR_LANGUAGE` | no | Twilio voice and language for Arabic calls, default `Polly.Zeina` / `arb` (**not yet tested against Twilio**; check Twilio's list of supported voices) |
 | `TEST_NUMBERS` | no | e.g. `+15555550100=123456,+15555550101=654321` |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | with `twilio` | from the Twilio console |
 | `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM_NUMBER` | with `twilio` | sender for SMS (a messaging service is recommended for international delivery) |

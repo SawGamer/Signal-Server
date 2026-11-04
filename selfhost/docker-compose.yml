@@ -115,6 +115,7 @@ services:
       SHARED_SECRET: ${REGISTRATION_SHARED_SECRET}
       SENDER: ${SMS_SENDER:-log}
       APP_NAME: ${APP_NAME}
+      DEFAULT_LANGUAGE: ${SMS_DEFAULT_LANGUAGE:-ar}   # used when the phone doesn't say (Arabic or English)
       TEST_NUMBERS: ${TEST_NUMBERS:-}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}

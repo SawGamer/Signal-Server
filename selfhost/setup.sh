@@ -74,6 +74,8 @@ IOS_BUNDLE_ID=com.example.messenger
 # ---- Phone verification ----
 # log = print codes to the registration container's log (development only); twilio = real SMS
 SMS_SENDER=log
+# Codes are sent in the phone's language (Arabic or English); this is the fallback: ar or en
+SMS_DEFAULT_LANGUAGE=ar
 # Fixed-code numbers that never get an SMS, e.g. +15555550100=123456,+15555550101=654321
 TEST_NUMBERS=
 TWILIO_ACCOUNT_SID=

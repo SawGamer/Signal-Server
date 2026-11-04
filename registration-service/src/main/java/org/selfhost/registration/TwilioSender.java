@@ -29,29 +29,27 @@ final class TwilioSender implements VerificationSender {
   private static final Pattern ERROR_CODE = Pattern.compile("\"code\"\\s*:\\s*(\\d+)");
 
   private final Config.TwilioConfig config;
-  private final String appName;
-  private final String smsTemplate;
+  private final MessageTexts texts;
   private final HttpClient httpClient;
   private final String authorizationHeader;
 
-  TwilioSender(final Config.TwilioConfig config, final String appName, final String smsTemplate,
-      final HttpClient httpClient) {
+  TwilioSender(final Config.TwilioConfig config, final MessageTexts texts, final HttpClient httpClient) {
     this.config = config;
-    this.appName = appName;
-    this.smsTemplate = smsTemplate;
+    this.texts = texts;
     this.httpClient = httpClient;
     this.authorizationHeader = "Basic " + Base64.getEncoder()
         .encodeToString((config.accountSid() + ":" + config.authToken()).getBytes(StandardCharsets.UTF_8));
   }
 
-  TwilioSender(final Config.TwilioConfig config, final String appName, final String smsTemplate) {
-    this(config, appName, smsTemplate, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+  TwilioSender(final Config.TwilioConfig config, final MessageTexts texts) {
+    this(config, texts, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
   }
 
   @Override
   public void send(final String e164, final String code, final MessageTransport transport,
       final ClientType clientType, final String acceptLanguage) throws SenderException {
 
+    final MessageTexts.Language language = texts.pick(acceptLanguage);
     final Map<String, String> form = new LinkedHashMap<>();
     form.put("To", e164);
 
@@ -62,7 +60,7 @@ final class TwilioSender implements VerificationSender {
       }
       resource = "Calls.json";
       form.put("From", config.fromNumber());
-      form.put("Twiml", voiceTwiml(code));
+      form.put("Twiml", texts.voiceTwiml(language, code));
     } else {
       resource = "Messages.json";
       if (config.messagingServiceSid() != null && !config.messagingServiceSid().isBlank()) {
@@ -70,7 +68,7 @@ final class TwilioSender implements VerificationSender {
       } else {
         form.put("From", config.fromNumber());
       }
-      form.put("Body", renderSms(smsTemplate, appName, code));
+      form.put("Body", texts.sms(language, code));
     }
 
     final HttpRequest request = HttpRequest.newBuilder()
@@ -99,17 +97,6 @@ final class TwilioSender implements VerificationSender {
     log.warn("Twilio returned HTTP {} (error {}) sending {} to {}", response.statusCode(), twilioCode, transport,
         Redact.e164(e164));
     throw new SenderException(classify(response.statusCode(), twilioCode), "Twilio error " + twilioCode);
-  }
-
-  static String renderSms(final String template, final String appName, final String code) {
-    return template.replace("{app}", appName).replace("{code}", code);
-  }
-
-  /** Reads digits one at a time, twice, so they're intelligible over a phone line. */
-  static String voiceTwiml(final String code) {
-    final String spaced = code.chars().mapToObj(c -> String.valueOf((char) c)).collect(Collectors.joining(", "));
-    return "<Response><Say>Your verification code is: " + spaced + ". Again, your code is: " + spaced
-        + ".</Say></Response>";
   }
 
   /**

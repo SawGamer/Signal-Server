@@ -16,8 +16,7 @@ import java.util.function.Function;
  *                             triggering (paid) SMS sends
  * @param sender               which {@link VerificationSender} to use: {@code log} (development only) or
  *                             {@code twilio}
- * @param appName              substituted into message templates
- * @param smsTemplate          SMS text; {@code {code}} and {@code {app}} are replaced
+ * @param texts                SMS / voice wording in English and Arabic
  * @param testNumbers          E.164 numbers that never receive a real SMS and always accept a fixed code (useful for
  *                             app-store review accounts and automated tests)
  * @param twilio               Twilio settings, required when {@code sender=twilio}
@@ -29,8 +28,7 @@ public record Config(
     String tlsPrivateKeyPath,
     String sharedSecret,
     String sender,
-    String appName,
-    String smsTemplate,
+    MessageTexts texts,
     Map<String, String> testNumbers,
     TwilioConfig twilio,
     Policy policy) {
@@ -66,8 +64,6 @@ public record Config(
     }
   }
 
-  static final String DEFAULT_SMS_TEMPLATE = "Your {app} code: {code}\n\nDo not share this code with anyone.";
-
   public static Config fromEnvironment() {
     return fromMap(System.getenv());
   }
@@ -102,11 +98,24 @@ public record Config(
         required.apply("TLS_PRIVATE_KEY"),
         required.apply("SHARED_SECRET"),
         sender,
-        env.getOrDefault("APP_NAME", "Messenger"),
-        env.getOrDefault("SMS_TEMPLATE", DEFAULT_SMS_TEMPLATE),
+        new MessageTexts(
+            env.getOrDefault("APP_NAME", "Messenger"),
+            env.getOrDefault("SMS_TEMPLATE", MessageTexts.DEFAULT_SMS_EN),
+            env.getOrDefault("SMS_TEMPLATE_AR", MessageTexts.DEFAULT_SMS_AR),
+            parseLanguage(env.getOrDefault("DEFAULT_LANGUAGE", "en")),
+            env.getOrDefault("VOICE_AR", "Polly.Zeina"),
+            env.getOrDefault("VOICE_AR_LANGUAGE", "arb")),
         parseTestNumbers(env.getOrDefault("TEST_NUMBERS", "")),
         twilio,
         Policy.defaults());
+  }
+
+  static MessageTexts.Language parseLanguage(final String value) {
+    return switch (value.trim().toLowerCase()) {
+      case "ar" -> MessageTexts.Language.AR;
+      case "en" -> MessageTexts.Language.EN;
+      default -> throw new IllegalArgumentException("DEFAULT_LANGUAGE must be en or ar");
+    };
   }
 
   /**

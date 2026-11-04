@@ -25,7 +25,7 @@ public final class RegistrationServer {
 
     final VerificationSender sender = switch (config.sender()) {
       case "log" -> new LogSender();
-      case "twilio" -> new TwilioSender(config.twilio(), config.appName(), config.smsTemplate());
+      case "twilio" -> new TwilioSender(config.twilio(), config.texts());
       default -> throw new IllegalArgumentException("Unknown SENDER '" + config.sender() + "' (use log or twilio)");
     };
 
@@ -59,8 +59,8 @@ public final class RegistrationServer {
       }
     }));
 
-    log.info("Registration service listening on port {} (sender={}, test numbers={})", config.port(),
-        config.sender(), config.testNumbers().size());
+    log.info("Registration service listening on port {} (sender={}, default language={}, test numbers={})",
+        config.port(), config.sender(), config.texts().defaultLanguage(), config.testNumbers().size());
     server.awaitTermination();
   }
 }

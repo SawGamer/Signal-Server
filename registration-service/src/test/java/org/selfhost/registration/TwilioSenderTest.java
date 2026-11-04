@@ -53,8 +53,11 @@ class TwilioSenderTest {
 
   private TwilioSender sender(final String from, final String messagingServiceSid) {
     return new TwilioSender(new Config.TwilioConfig("AC123", "tok", from, messagingServiceSid,
-        "http://127.0.0.1:" + fakeTwilio.getAddress().getPort()), "Acme Chat", Config.DEFAULT_SMS_TEMPLATE);
+        "http://127.0.0.1:" + fakeTwilio.getAddress().getPort()), TEXTS);
   }
+
+  private static final MessageTexts TEXTS = new MessageTexts("Acme Chat", MessageTexts.DEFAULT_SMS_EN,
+      MessageTexts.DEFAULT_SMS_AR, MessageTexts.Language.EN, "Polly.Zeina", "arb");
 
   @Test
   void sendsSms() throws Exception {
@@ -67,6 +70,35 @@ class TwilioSenderTest {
     assertEquals("+4915123456789", lastForm.get().get("To"));
     assertEquals("+15550001111", lastForm.get().get("From"));
     assertEquals("Your Acme Chat code: 123456\n\nDo not share this code with anyone.", lastForm.get().get("Body"));
+  }
+
+  @Test
+  void sendsArabicSmsWhenPhoneLanguageIsArabic() throws Exception {
+    sender("+15550001111", null).send("+963912345678", "123456", MessageTransport.MESSAGE_TRANSPORT_SMS,
+        ClientType.CLIENT_TYPE_ANDROID_WITH_FCM, "ar-SY,ar;q=0.9,en;q=0.8");
+    assertEquals("رمز التحقق في Acme Chat: 123456\n\nلا تشارك هذا الرمز مع أي شخص.", lastForm.get().get("Body"));
+  }
+
+  @Test
+  void placesArabicVoiceCall() throws Exception {
+    sender("+15550001111", null).send("+963912345678", "123456", MessageTransport.MESSAGE_TRANSPORT_VOICE,
+        ClientType.CLIENT_TYPE_IOS, "ar");
+    final String twiml = lastForm.get().get("Twiml");
+    assertTrue(twiml.startsWith("<Response><Say voice=\"Polly.Zeina\" language=\"arb\">"), twiml);
+    assertTrue(twiml.contains("1، 2، 3، 4، 5، 6"), twiml);
+  }
+
+  @Test
+  void picksLanguageFromAcceptLanguage() {
+    assertEquals(MessageTexts.Language.AR, TEXTS.pick("ar"));
+    assertEquals(MessageTexts.Language.AR, TEXTS.pick("ar-SY"));
+    assertEquals(MessageTexts.Language.AR, TEXTS.pick("en;q=0.5, ar-SY;q=0.9"));
+    assertEquals(MessageTexts.Language.EN, TEXTS.pick("en-US,ar;q=0.5"));
+    assertEquals(MessageTexts.Language.EN, TEXTS.pick("de"));
+    assertEquals(MessageTexts.Language.EN, TEXTS.pick(""), "falls back to the default");
+    final MessageTexts arabicDefault = new MessageTexts("x", "en {code}", "ar {code}", MessageTexts.Language.AR, "v", "l");
+    assertEquals(MessageTexts.Language.AR, arabicDefault.pick(null));
+    assertEquals(MessageTexts.Language.AR, arabicDefault.pick("*"));
   }
 
   @Test
