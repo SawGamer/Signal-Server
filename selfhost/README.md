@@ -93,8 +93,12 @@ docker run --rm --network host -v "$PWD/build:/b:ro" -v "$PWD/e2e:/e2e:ro" eclip
 ## Operating it
 
 - **Change feature flags or rate limits:** edit `config/dynamic-config.yml`; it's picked up within 10 seconds.
-- **Update to a new Signal release:** merge the upstream tag, run `./selfhost/build.sh`, then
-  `docker compose up -d`.
+- **Update to a new Signal release:**
+  1. Merge the upstream tag.
+  2. Regenerate the server config with
+     `python3 selfhost/tools/derive-server-config.py service/src/test/resources/config/test.yml selfhost/config/server.yml`
+     and review the diff.
+  3. Run `./selfhost/build.sh`, then `docker compose up -d`.
 - **Backups:** the Docker volumes `dynamodb-data` (accounts, keys, profiles), `fdb-data` (undelivered
   messages), `s3-data` (avatars) and `redis-data`, plus `secrets/` and `.env`.
 
