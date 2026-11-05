@@ -6,16 +6,18 @@
 package org.whispersystems.textsecuregcm.grpc;
 
 import com.google.protobuf.ByteString;
-import io.grpc.Status;
-import java.util.Base64;
+import com.google.protobuf.Empty;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
+import org.signal.chat.device.ChangeDevicePasswordRequest;
+import org.signal.chat.device.ChangeDevicePasswordResponse;
 import org.signal.chat.device.ClearPushTokenRequest;
 import org.signal.chat.device.ClearPushTokenResponse;
 import org.signal.chat.device.GetDevicesRequest;
 import org.signal.chat.device.GetDevicesResponse;
-import org.signal.chat.device.ReactorDevicesGrpc;
 import org.signal.chat.device.RemoveDeviceRequest;
 import org.signal.chat.device.RemoveDeviceResponse;
 import org.signal.chat.device.SetCapabilitiesRequest;
@@ -24,185 +26,184 @@ import org.signal.chat.device.SetDeviceNameRequest;
 import org.signal.chat.device.SetDeviceNameResponse;
 import org.signal.chat.device.SetPushTokenRequest;
 import org.signal.chat.device.SetPushTokenResponse;
+import org.signal.chat.device.SimpleDevicesGrpc;
+import org.signal.chat.errors.NotFound;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticationUtil;
+import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.KeysManager;
-import org.whispersystems.textsecuregcm.storage.MessagesManager;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 
-public class DevicesGrpcService extends ReactorDevicesGrpc.DevicesImplBase {
+public class DevicesGrpcService extends SimpleDevicesGrpc.DevicesImplBase {
 
   private final AccountsManager accountsManager;
-  private final KeysManager keysManager;
-  private final MessagesManager messagesManager;
 
-  private static final int MAX_NAME_LENGTH = 256;
-
-  public DevicesGrpcService(final AccountsManager accountsManager,
-      final KeysManager keysManager,
-      final MessagesManager messagesManager) {
-
+  public DevicesGrpcService(final AccountsManager accountsManager) {
     this.accountsManager = accountsManager;
-    this.keysManager = keysManager;
-    this.messagesManager = messagesManager;
   }
 
   @Override
-  public Mono<GetDevicesResponse> getDevices(final GetDevicesRequest request) {
-    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+  public GetDevicesResponse getDevices(final GetDevicesRequest request) {
+    final Account account = getAuthenticatedAccount();
 
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMapMany(account -> Flux.fromIterable(account.getDevices()))
-        .reduce(GetDevicesResponse.newBuilder(), (builder, device) -> {
-          final GetDevicesResponse.LinkedDevice.Builder linkedDeviceBuilder = GetDevicesResponse.LinkedDevice.newBuilder();
+    final GetDevicesResponse.Builder responseBuilder = GetDevicesResponse.newBuilder();
+
+    account.getDevices().stream()
+        .map(device -> {
+          final GetDevicesResponse.LinkedDevice.Builder linkedDeviceBuilder =
+              GetDevicesResponse.LinkedDevice.newBuilder()
+                  .setId(device.getId())
+                  .setLastSeen(device.getLastSeen())
+                  .setRegistrationId(device.getAccountRegistrationId())
+                  .setCreatedAtCiphertext(ByteString.copyFrom(device.getCreatedAtCiphertext()));
 
           if (device.getName() != null) {
             linkedDeviceBuilder.setName(ByteString.copyFrom(device.getName()));
           }
 
-          return builder.addDevices(linkedDeviceBuilder
-              .setId(device.getId())
-              .setCreated(device.getCreated())
-              .setLastSeen(device.getLastSeen())
-              .build());
+          return linkedDeviceBuilder.build();
         })
-        .map(GetDevicesResponse.Builder::build);
+        .forEach(responseBuilder::addDevices);
+
+    return responseBuilder.build();
   }
 
   @Override
-  public Mono<RemoveDeviceResponse> removeDevice(final RemoveDeviceRequest request) {
+  public RemoveDeviceResponse removeDevice(final RemoveDeviceRequest request) {
     if (request.getId() == Device.PRIMARY_ID) {
-      throw Status.INVALID_ARGUMENT.withDescription("Cannot remove primary device").asRuntimeException();
+      throw GrpcExceptions.invalidArguments("cannot remove primary device");
     }
+
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+
+    if (authenticatedDevice.deviceId() != Device.PRIMARY_ID && request.getId() != authenticatedDevice.deviceId()) {
+      throw GrpcExceptions.badAuthentication("linked devices cannot remove devices other than themselves");
+    }
+
+    accountsManager.removeDevice(authenticatedDevice.accountIdentifier(), DeviceIdUtil.validate(request.getId()));
+
+    return RemoveDeviceResponse.getDefaultInstance();
+  }
+
+  @Override
+  public SetDeviceNameResponse setDeviceName(final SetDeviceNameRequest request) {
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
     final byte deviceId = DeviceIdUtil.validate(request.getId());
 
-    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedPrimaryDevice();
+    final boolean mayChangeName = authenticatedDevice.deviceId() == Device.PRIMARY_ID ||
+        authenticatedDevice.deviceId() == deviceId;
 
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account -> Mono.fromFuture(accountsManager.removeDevice(account, deviceId)))
-        .thenReturn(RemoveDeviceResponse.newBuilder().build());
+    if (!mayChangeName) {
+      throw GrpcExceptions.badAuthentication("linked device is not authorized to change target device name");
+    }
+
+    final Account account = getAuthenticatedAccount();
+
+    if (account.getDevice(deviceId).isEmpty()) {
+      return SetDeviceNameResponse.newBuilder().setTargetDeviceNotFound(NotFound.getDefaultInstance()).build();
+    }
+
+    accountsManager.updateDevice(account.getAccountIdentifier(), deviceId, device -> device.setName(request.getName().toByteArray()));
+
+    return SetDeviceNameResponse.newBuilder().setSuccess(Empty.getDefaultInstance()).build();
   }
 
   @Override
-  public Mono<SetDeviceNameResponse> setDeviceName(final SetDeviceNameRequest request) {
-    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
-
-    if (request.getName().isEmpty()) {
-      throw Status.INVALID_ARGUMENT.withDescription("Must specify a device name").asRuntimeException();
-    }
-
-    if (request.getName().size() > MAX_NAME_LENGTH) {
-      throw Status.INVALID_ARGUMENT.withDescription("Device name must be at most " + MAX_NAME_LENGTH + " bytes")
-          .asRuntimeException();
-    }
-
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account -> Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(),
-            device -> device.setName(request.getName().toByteArray()))))
-        .thenReturn(SetDeviceNameResponse.newBuilder().build());
-  }
-
-  @Override
-  public Mono<SetPushTokenResponse> setPushToken(final SetPushTokenRequest request) {
+  public SetPushTokenResponse setPushToken(final SetPushTokenRequest request) {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
     @Nullable final String apnsToken;
-    @Nullable final String apnsVoipToken;
     @Nullable final String fcmToken;
 
     switch (request.getTokenRequestCase()) {
 
       case APNS_TOKEN_REQUEST -> {
         final SetPushTokenRequest.ApnsTokenRequest apnsTokenRequest = request.getApnsTokenRequest();
-
-        if (StringUtils.isAllBlank(apnsTokenRequest.getApnsToken(), apnsTokenRequest.getApnsVoipToken())) {
-          throw Status.INVALID_ARGUMENT.withDescription("APNs tokens may not both be blank").asRuntimeException();
-        }
-
         apnsToken = StringUtils.stripToNull(apnsTokenRequest.getApnsToken());
-        apnsVoipToken = StringUtils.stripToNull(apnsTokenRequest.getApnsVoipToken());
         fcmToken = null;
       }
 
       case FCM_TOKEN_REQUEST -> {
         final SetPushTokenRequest.FcmTokenRequest fcmTokenRequest = request.getFcmTokenRequest();
-
-        if (StringUtils.isBlank(fcmTokenRequest.getFcmToken())) {
-          throw Status.INVALID_ARGUMENT.withDescription("FCM token must not be blank").asRuntimeException();
-        }
-
         apnsToken = null;
-        apnsVoipToken = null;
         fcmToken = StringUtils.stripToNull(fcmTokenRequest.getFcmToken());
       }
 
-      default -> throw Status.INVALID_ARGUMENT.withDescription("No tokens specified").asRuntimeException();
+      default -> throw GrpcExceptions.fieldViolation("token_request", "No tokens specified");
     }
 
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account -> {
-          final Device device = account.getDevice(authenticatedDevice.deviceId())
-              .orElseThrow(Status.UNAUTHENTICATED::asRuntimeException);
+    final Account account = getAuthenticatedAccount();
 
-          final boolean tokenUnchanged =
-              Objects.equals(device.getApnId(), apnsToken) &&
-                  Objects.equals(device.getVoipApnId(), apnsVoipToken) &&
-                  Objects.equals(device.getGcmId(), fcmToken);
+    final Device device = account.getDevice(authenticatedDevice.deviceId())
+        .orElseThrow(() -> GrpcExceptions.invalidCredentials("invalid credentials"));
 
-          return tokenUnchanged
-              ? Mono.empty()
-              : Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(), d -> {
-                d.setApnId(apnsToken);
-                d.setVoipApnId(apnsVoipToken);
-                d.setGcmId(fcmToken);
-                d.setFetchesMessages(false);
-              }));
-        })
-        .thenReturn(SetPushTokenResponse.newBuilder().build());
+    // Unlike FCM tokens, we need current "last updated" timestamps for APNs tokens and so update device records
+    // unconditionally if it's an APNS request
+    if (request.hasApnsTokenRequest() || !Objects.equals(device.getGcmId(), fcmToken)) {
+      accountsManager.updateDevice(account.getAccountIdentifier(), authenticatedDevice.deviceId(), d -> {
+        d.setApnId(apnsToken);
+        d.setGcmId(fcmToken);
+        d.setFetchesMessages(false);
+      });
+    }
+
+    return SetPushTokenResponse.getDefaultInstance();
   }
 
   @Override
-  public Mono<ClearPushTokenResponse> clearPushToken(final ClearPushTokenRequest request) {
+  public ClearPushTokenResponse clearPushToken(final ClearPushTokenRequest request) {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account -> Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(), device -> {
-          if (StringUtils.isNotBlank(device.getApnId()) || StringUtils.isNotBlank(device.getVoipApnId())) {
-            device.setUserAgent(device.isPrimary() ? "OWI" : "OWP");
-          } else if (StringUtils.isNotBlank(device.getGcmId())) {
-            device.setUserAgent("OWA");
-          }
+    accountsManager.updateDevice(authenticatedDevice.accountIdentifier(), authenticatedDevice.deviceId(), device -> {
+      if (StringUtils.isNotBlank(device.getApnId())) {
+        device.setUserAgent(device.isPrimary() ? "OWI" : "OWP");
+      } else if (StringUtils.isNotBlank(device.getGcmId())) {
+        device.setUserAgent("OWA");
+      }
 
-          device.setApnId(null);
-          device.setVoipApnId(null);
-          device.setGcmId(null);
-          device.setFetchesMessages(true);
-        })))
-        .thenReturn(ClearPushTokenResponse.newBuilder().build());
+      device.setApnId(null);
+      device.setGcmId(null);
+      device.setFetchesMessages(true);
+    });
+
+    return ClearPushTokenResponse.getDefaultInstance();
   }
 
   @Override
-  public Mono<SetCapabilitiesResponse> setCapabilities(final SetCapabilitiesRequest request) {
+  public SetCapabilitiesResponse setCapabilities(final SetCapabilitiesRequest request) {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
-    return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-        .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account ->
-            Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(),
-                d -> d.setCapabilities(new Device.DeviceCapabilities(
-                    request.getStorage(),
-                    request.getTransfer(),
-                    request.getPni(),
-                    request.getPaymentActivation())))))
-        .thenReturn(SetCapabilitiesResponse.newBuilder().build());
+    final Set<DeviceCapability> capabilities = request.getCapabilitiesList().stream()
+        .map(DeviceCapabilityUtil::fromGrpcDeviceCapability)
+        .collect(Collectors.toSet());
+
+    accountsManager.updateDevice(authenticatedDevice.accountIdentifier(), authenticatedDevice.deviceId(),
+        device -> device.setCapabilities(capabilities));
+
+    return SetCapabilitiesResponse.getDefaultInstance();
+  }
+
+  @Override
+  public ChangeDevicePasswordResponse changeDevicePassword(final ChangeDevicePasswordRequest request) {
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+
+    if (request.getNewPassword().isBlank()) {
+      throw GrpcExceptions.fieldViolation("new_password", "password must not be blank");
+    }
+
+    if (!accountsManager.updateDevicePassword(authenticatedDevice.accountIdentifier(), authenticatedDevice.deviceId(),
+        request.getNewPassword())) {
+
+      throw GrpcExceptions.invalidCredentials("invalid credentials");
+    }
+
+    return ChangeDevicePasswordResponse.getDefaultInstance();
+  }
+
+  private Account getAuthenticatedAccount() {
+    return accountsManager.getByAccountIdentifier(AuthenticationUtil.requireAuthenticatedDevice().accountIdentifier())
+        .orElseThrow(() -> GrpcExceptions.invalidCredentials("invalid credentials"));
   }
 }

@@ -1,429 +1,481 @@
 /*
- * Copyright 2021 Signal Messenger, LLC
+ * Copyright 2024 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
-
 package org.whispersystems.textsecuregcm.storage;
 
-import static org.whispersystems.textsecuregcm.util.AttributeValues.b;
-import static org.whispersystems.textsecuregcm.util.AttributeValues.n;
-import static org.whispersystems.textsecuregcm.util.AttributeValues.s;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Throwables;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.time.Instant;
-import java.util.Map;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.core.Response;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.subscriptions.ProcessorCustomer;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionProcessor;
-import org.whispersystems.textsecuregcm.util.Pair;
-import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
-import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
-import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
-import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
-import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
+import org.signal.libsignal.zkgroup.InvalidInputException;
+import org.signal.libsignal.zkgroup.VerificationFailedException;
+import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialRequest;
+import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialResponse;
+import org.signal.libsignal.zkgroup.receipts.ServerZkReceiptOperations;
+import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
+import org.whispersystems.textsecuregcm.purchases.AppleAppStoreManager;
+import org.whispersystems.textsecuregcm.purchases.CustomerAwareSubscriptionPaymentProcessor;
+import org.whispersystems.textsecuregcm.purchases.GooglePlayBillingManager;
+import org.whispersystems.textsecuregcm.purchases.PaymentProvider;
+import org.whispersystems.textsecuregcm.purchases.ProcessorCustomer;
+import org.whispersystems.textsecuregcm.purchases.ReceiptLevel;
+import org.whispersystems.textsecuregcm.purchases.SubscriberIdCreationNotPermittedException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseForbiddenException;
+import org.whispersystems.textsecuregcm.purchases.SubscriptionInformation;
+import org.whispersystems.textsecuregcm.purchases.PurchaseInvalidArgumentsException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseInvalidIdempotencyKeyException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseInvalidLevelException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseNotFoundException;
+import org.whispersystems.textsecuregcm.purchases.SubscriptionPaymentProcessor;
+import org.whispersystems.textsecuregcm.purchases.PurchasePaymentRequiredException;
+import org.whispersystems.textsecuregcm.purchases.PurchasePaymentRequiresActionException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseProcessorConflictException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseProcessorException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseReceiptAlreadyRedeemedException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseReceiptRequestedForOpenPaymentException;
+import org.whispersystems.textsecuregcm.util.ThrowingBiFunction;
+import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
 
+/**
+ * Manages updates to the Subscriptions table and the upstream subscription payment providers.
+ * <p>
+ * This handles a number of common subscription management operations like adding/removing subscribers and creating ZK
+ * receipt credentials for a subscriber's active subscription. Some subscription management operations only apply to
+ * certain payment providers. In those cases, the operation will take the payment provider that implements the specific
+ * functionality as an argument to the method.
+ */
 public class SubscriptionManager {
 
-  private static final Logger logger = LoggerFactory.getLogger(SubscriptionManager.class);
+  private static final String RECEIPT_ALREADY_REDEEMED_COUNTER_NAME = MetricsUtil.name(SubscriptionManager.class,
+      "receiptAlreadyRedeemed");
 
-  private static final int USER_LENGTH = 16;
-
-  public static final String KEY_USER = "U";  // B  (Hash Key)
-  public static final String KEY_PASSWORD = "P";  // B
-  public static final String KEY_PROCESSOR_ID_CUSTOMER_ID = "PC"; // B (GSI Hash Key of `pc_to_u` index)
-  public static final String KEY_CREATED_AT = "R";  // N
-  public static final String KEY_SUBSCRIPTION_ID = "S";  // S
-  public static final String KEY_SUBSCRIPTION_CREATED_AT = "T";  // N
-  public static final String KEY_SUBSCRIPTION_LEVEL = "L";
-  public static final String KEY_SUBSCRIPTION_LEVEL_CHANGED_AT = "V";  // N
-  public static final String KEY_ACCESSED_AT = "A";  // N
-  public static final String KEY_CANCELED_AT = "B";  // N
-  public static final String KEY_CURRENT_PERIOD_ENDS_AT = "D";  // N
-
-  public static final String INDEX_NAME = "pc_to_u";  // Hash Key "PC"
-
-  public static class Record {
-
-    public final byte[] user;
-    public final byte[] password;
-    public final Instant createdAt;
-    @VisibleForTesting
-    @Nullable
-    ProcessorCustomer processorCustomer;
-    @Nullable
-    public String subscriptionId;
-    public Instant subscriptionCreatedAt;
-    public Long subscriptionLevel;
-    public Instant subscriptionLevelChangedAt;
-    public Instant accessedAt;
-    public Instant canceledAt;
-    public Instant currentPeriodEndsAt;
-
-    private Record(byte[] user, byte[] password, Instant createdAt) {
-      this.user = checkUserLength(user);
-      this.password = Objects.requireNonNull(password);
-      this.createdAt = Objects.requireNonNull(createdAt);
-    }
-
-    public static Record from(byte[] user, Map<String, AttributeValue> item) {
-      Record record = new Record(
-          user,
-          item.get(KEY_PASSWORD).b().asByteArray(),
-          getInstant(item, KEY_CREATED_AT));
-
-      final Pair<SubscriptionProcessor, String> processorCustomerId = getProcessorAndCustomer(item);
-      if (processorCustomerId != null) {
-        record.processorCustomer = new ProcessorCustomer(processorCustomerId.second(), processorCustomerId.first());
-      }
-      record.subscriptionId = getString(item, KEY_SUBSCRIPTION_ID);
-      record.subscriptionCreatedAt = getInstant(item, KEY_SUBSCRIPTION_CREATED_AT);
-      record.subscriptionLevel = getLong(item, KEY_SUBSCRIPTION_LEVEL);
-      record.subscriptionLevelChangedAt = getInstant(item, KEY_SUBSCRIPTION_LEVEL_CHANGED_AT);
-      record.accessedAt = getInstant(item, KEY_ACCESSED_AT);
-      record.canceledAt = getInstant(item, KEY_CANCELED_AT);
-      record.currentPeriodEndsAt = getInstant(item, KEY_CURRENT_PERIOD_ENDS_AT);
-      return record;
-    }
-
-    public Optional<ProcessorCustomer> getProcessorCustomer() {
-      return Optional.ofNullable(processorCustomer);
-    }
-
-    /**
-     * Extracts the active processor and customer from a single attribute value in the given item.
-     * <p>
-     * Until existing data is migrated, this may return {@code null}.
-     */
-    @Nullable
-    private static Pair<SubscriptionProcessor, String> getProcessorAndCustomer(Map<String, AttributeValue> item) {
-
-      final AttributeValue attributeValue = item.get(KEY_PROCESSOR_ID_CUSTOMER_ID);
-
-      if (attributeValue == null) {
-        // temporarily allow null values
-        return null;
-      }
-
-      final byte[] processorAndCustomerId = attributeValue.b().asByteArray();
-      final byte processorId = processorAndCustomerId[0];
-
-      final SubscriptionProcessor processor = SubscriptionProcessor.forId(processorId);
-      if (processor == null) {
-        throw new IllegalStateException("unknown processor id: " + processorId);
-      }
-
-      final String customerId = new String(processorAndCustomerId, 1, processorAndCustomerId.length - 1,
-          StandardCharsets.UTF_8);
-
-      return new Pair<>(processor, customerId);
-    }
-
-    private static String getString(Map<String, AttributeValue> item, String key) {
-      AttributeValue attributeValue = item.get(key);
-      if (attributeValue == null) {
-        return null;
-      }
-      return attributeValue.s();
-    }
-
-    private static Long getLong(Map<String, AttributeValue> item, String key) {
-      AttributeValue attributeValue = item.get(key);
-      if (attributeValue == null || attributeValue.n() == null) {
-        return null;
-      }
-      return Long.valueOf(attributeValue.n());
-    }
-
-    private static Instant getInstant(Map<String, AttributeValue> item, String key) {
-      AttributeValue attributeValue = item.get(key);
-      if (attributeValue == null || attributeValue.n() == null) {
-        return null;
-      }
-      return Instant.ofEpochSecond(Long.parseLong(attributeValue.n()));
-    }
-  }
-
-  private final String table;
-  private final DynamoDbAsyncClient client;
+  private final Subscriptions subscriptions;
+  private final EnumMap<PaymentProvider, SubscriptionPaymentProcessor> processors;
+  private final ServerZkReceiptOperations zkReceiptOperations;
+  private final IssuedReceiptsManager issuedReceiptsManager;
 
   public SubscriptionManager(
-      @Nonnull String table,
-      @Nonnull DynamoDbAsyncClient client) {
-    this.table = Objects.requireNonNull(table);
-    this.client = Objects.requireNonNull(client);
+      @Nonnull Subscriptions subscriptions,
+      @Nonnull List<SubscriptionPaymentProcessor> processors,
+      @Nonnull ServerZkReceiptOperations zkReceiptOperations,
+      @Nonnull IssuedReceiptsManager issuedReceiptsManager) {
+    this.subscriptions = Objects.requireNonNull(subscriptions);
+    this.processors = new EnumMap<>(processors.stream()
+        .collect(Collectors.toMap(SubscriptionPaymentProcessor::getProvider, Function.identity())));
+    this.zkReceiptOperations = Objects.requireNonNull(zkReceiptOperations);
+    this.issuedReceiptsManager = Objects.requireNonNull(issuedReceiptsManager);
   }
 
   /**
-   * Looks in the GSI for a record with the given customer id and returns the user id.
-   */
-  public CompletableFuture<byte[]> getSubscriberUserByProcessorCustomer(ProcessorCustomer processorCustomer) {
-    QueryRequest query = QueryRequest.builder()
-        .tableName(table)
-        .indexName(INDEX_NAME)
-        .keyConditionExpression("#processor_customer_id = :processor_customer_id")
-        .projectionExpression("#user")
-        .expressionAttributeNames(Map.of(
-            "#processor_customer_id", KEY_PROCESSOR_ID_CUSTOMER_ID,
-            "#user", KEY_USER))
-        .expressionAttributeValues(Map.of(
-            ":processor_customer_id", b(processorCustomer.toDynamoBytes())))
-        .build();
-    return client.query(query).thenApply(queryResponse -> {
-      int count = queryResponse.count();
-      if (count == 0) {
-        return null;
-      } else if (count > 1) {
-        logger.error("expected invariant of 1-1 subscriber-customer violated for customer {} ({})",
-            processorCustomer.customerId(), processorCustomer.processor());
-        throw new IllegalStateException(
-            "expected invariant of 1-1 subscriber-customer violated for customer " + processorCustomer);
-      } else {
-        Map<String, AttributeValue> result = queryResponse.items().get(0);
-        return result.get(KEY_USER).b().asByteArray();
-      }
-    });
-  }
-
-  public static class GetResult {
-
-    public static final GetResult NOT_STORED = new GetResult(Type.NOT_STORED, null);
-    public static final GetResult PASSWORD_MISMATCH = new GetResult(Type.PASSWORD_MISMATCH, null);
-
-    public enum Type {
-      NOT_STORED,
-      PASSWORD_MISMATCH,
-      FOUND
-    }
-
-    public final Type type;
-    public final Record record;
-
-    private GetResult(Type type, Record record) {
-      this.type = type;
-      this.record = record;
-    }
-
-    public static GetResult found(Record record) {
-      return new GetResult(Type.FOUND, record);
-    }
-  }
-
-  /**
-   * Looks up a record with the given {@code user} and validates the {@code hmac} before returning it.
-   */
-  public CompletableFuture<GetResult> get(byte[] user, byte[] hmac) {
-    return getUser(user).thenApply(getItemResponse -> {
-      if (!getItemResponse.hasItem()) {
-        return GetResult.NOT_STORED;
-      }
-
-      Record record = Record.from(user, getItemResponse.item());
-      if (!MessageDigest.isEqual(hmac, record.password)) {
-        return GetResult.PASSWORD_MISMATCH;
-      }
-      return GetResult.found(record);
-    });
-  }
-
-  private CompletableFuture<GetItemResponse> getUser(byte[] user) {
-    checkUserLength(user);
-
-    GetItemRequest request = GetItemRequest.builder()
-        .consistentRead(Boolean.TRUE)
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .build();
-
-    return client.getItem(request);
-  }
-
-  public CompletableFuture<Record> create(byte[] user, byte[] password, Instant createdAt) {
-    checkUserLength(user);
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .returnValues(ReturnValue.ALL_NEW)
-        .conditionExpression("attribute_not_exists(#user) OR #password = :password")
-        .updateExpression("SET "
-            + "#password = if_not_exists(#password, :password), "
-            + "#created_at = if_not_exists(#created_at, :created_at), "
-            + "#accessed_at = if_not_exists(#accessed_at, :accessed_at)"
-        )
-        .expressionAttributeNames(Map.of(
-            "#user", KEY_USER,
-            "#password", KEY_PASSWORD,
-            "#created_at", KEY_CREATED_AT,
-            "#accessed_at", KEY_ACCESSED_AT)
-        )
-        .expressionAttributeValues(Map.of(
-            ":password", b(password),
-            ":created_at", n(createdAt.getEpochSecond()),
-            ":accessed_at", n(createdAt.getEpochSecond()))
-        )
-        .build();
-    return client.updateItem(request).handle((updateItemResponse, throwable) -> {
-      if (throwable != null) {
-        if (Throwables.getRootCause(throwable) instanceof ConditionalCheckFailedException) {
-          return null;
-        }
-        Throwables.throwIfUnchecked(throwable);
-        throw new CompletionException(throwable);
-      }
-
-      return Record.from(user, updateItemResponse.attributes());
-    });
-  }
-
-  /**
-   * Sets the processor and customer ID for the given user record.
+   * Cancel a subscription with the upstream payment provider and remove the subscription from the table
    *
-   * @return the user record.
+   * @param subscriberCredentials Subscriber credentials derived from the subscriberId
+   * @throws RateLimitExceededException            if rate-limited
+   * @throws PurchaseNotFoundException         if the provided credentials are incorrect or the subscriber does not
+   *                                               exist
+   * @throws PurchaseInvalidArgumentsException if a precondition for cancellation was not met
    */
-  public CompletableFuture<Record> setProcessorAndCustomerId(Record userRecord,
-      ProcessorCustomer activeProcessorCustomer, Instant updatedAt) {
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(userRecord.user)))
-        .returnValues(ReturnValue.ALL_NEW)
-        .conditionExpression("attribute_not_exists(#processor_customer_id)")
-        .updateExpression("SET "
-            + "#processor_customer_id = :processor_customer_id, "
-            + "#accessed_at = :accessed_at"
-        )
-        .expressionAttributeNames(Map.of(
-            "#accessed_at", KEY_ACCESSED_AT,
-            "#processor_customer_id", KEY_PROCESSOR_ID_CUSTOMER_ID
-        ))
-        .expressionAttributeValues(Map.of(
-            ":accessed_at", n(updatedAt.getEpochSecond()),
-            ":processor_customer_id", b(activeProcessorCustomer.toDynamoBytes())
-        )).build();
-
-    return client.updateItem(request)
-        .thenApply(updateItemResponse -> Record.from(userRecord.user, updateItemResponse.attributes()))
-        .exceptionallyCompose(throwable -> {
-          if (Throwables.getRootCause(throwable) instanceof ConditionalCheckFailedException) {
-            throw new ClientErrorException(Response.Status.CONFLICT);
-          }
-          Throwables.throwIfUnchecked(throwable);
-          throw new CompletionException(throwable);
-        });
-  }
-
-  public CompletableFuture<Void> accessedAt(byte[] user, Instant accessedAt) {
-    checkUserLength(user);
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .returnValues(ReturnValue.NONE)
-        .updateExpression("SET #accessed_at = :accessed_at")
-        .expressionAttributeNames(Map.of("#accessed_at", KEY_ACCESSED_AT))
-        .expressionAttributeValues(Map.of(":accessed_at", n(accessedAt.getEpochSecond())))
-        .build();
-    return client.updateItem(request).thenApply(updateItemResponse -> null);
-  }
-
-  public CompletableFuture<Void> canceledAt(byte[] user, Instant canceledAt) {
-    checkUserLength(user);
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .returnValues(ReturnValue.NONE)
-        .updateExpression("SET "
-            + "#accessed_at = :accessed_at, "
-            + "#canceled_at = :canceled_at "
-            + "REMOVE #subscription_id")
-        .expressionAttributeNames(Map.of(
-            "#accessed_at", KEY_ACCESSED_AT,
-            "#canceled_at", KEY_CANCELED_AT,
-            "#subscription_id", KEY_SUBSCRIPTION_ID))
-        .expressionAttributeValues(Map.of(
-            ":accessed_at", n(canceledAt.getEpochSecond()),
-            ":canceled_at", n(canceledAt.getEpochSecond())))
-        .build();
-    return client.updateItem(request).thenApply(updateItemResponse -> null);
-  }
-
-  public CompletableFuture<Void> subscriptionCreated(
-      byte[] user, String subscriptionId, Instant subscriptionCreatedAt, long level) {
-    checkUserLength(user);
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .returnValues(ReturnValue.NONE)
-        .updateExpression("SET "
-            + "#accessed_at = :accessed_at, "
-            + "#subscription_id = :subscription_id, "
-            + "#subscription_created_at = :subscription_created_at, "
-            + "#subscription_level = :subscription_level, "
-            + "#subscription_level_changed_at = :subscription_level_changed_at")
-        .expressionAttributeNames(Map.of(
-            "#accessed_at", KEY_ACCESSED_AT,
-            "#subscription_id", KEY_SUBSCRIPTION_ID,
-            "#subscription_created_at", KEY_SUBSCRIPTION_CREATED_AT,
-            "#subscription_level", KEY_SUBSCRIPTION_LEVEL,
-            "#subscription_level_changed_at", KEY_SUBSCRIPTION_LEVEL_CHANGED_AT))
-        .expressionAttributeValues(Map.of(
-            ":accessed_at", n(subscriptionCreatedAt.getEpochSecond()),
-            ":subscription_id", s(subscriptionId),
-            ":subscription_created_at", n(subscriptionCreatedAt.getEpochSecond()),
-            ":subscription_level", n(level),
-            ":subscription_level_changed_at", n(subscriptionCreatedAt.getEpochSecond())))
-        .build();
-    return client.updateItem(request).thenApply(updateItemResponse -> null);
-  }
-
-  public CompletableFuture<Void> subscriptionLevelChanged(
-      byte[] user, Instant subscriptionLevelChangedAt, long level, String subscriptionId) {
-    checkUserLength(user);
-
-    UpdateItemRequest request = UpdateItemRequest.builder()
-        .tableName(table)
-        .key(Map.of(KEY_USER, b(user)))
-        .returnValues(ReturnValue.NONE)
-        .updateExpression("SET "
-            + "#accessed_at = :accessed_at, "
-            + "#subscription_id = :subscription_id, "
-            + "#subscription_level = :subscription_level, "
-            + "#subscription_level_changed_at = :subscription_level_changed_at")
-        .expressionAttributeNames(Map.of(
-            "#accessed_at", KEY_ACCESSED_AT,
-            "#subscription_id", KEY_SUBSCRIPTION_ID,
-            "#subscription_level", KEY_SUBSCRIPTION_LEVEL,
-            "#subscription_level_changed_at", KEY_SUBSCRIPTION_LEVEL_CHANGED_AT))
-        .expressionAttributeValues(Map.of(
-            ":accessed_at", n(subscriptionLevelChangedAt.getEpochSecond()),
-            ":subscription_id", s(subscriptionId),
-            ":subscription_level", n(level),
-            ":subscription_level_changed_at", n(subscriptionLevelChangedAt.getEpochSecond())))
-        .build();
-    return client.updateItem(request).thenApply(updateItemResponse -> null);
-  }
-
-  private static byte[] checkUserLength(final byte[] user) {
-    if (user.length != USER_LENGTH) {
-      throw new IllegalArgumentException("user length is wrong; expected " + USER_LENGTH + "; was " + user.length);
+  public void deleteSubscriber(final SubscriberCredentials subscriberCredentials)
+      throws PurchaseNotFoundException, PurchaseInvalidArgumentsException, RateLimitExceededException {
+    final Subscriptions.GetResult getResult =
+        subscriptions.get(subscriberCredentials.subscriberUser(), subscriberCredentials.hmac());
+    if (getResult == Subscriptions.GetResult.NOT_STORED
+        || getResult == Subscriptions.GetResult.PASSWORD_MISMATCH) {
+      throw new PurchaseNotFoundException();
     }
-    return user;
+
+    // a missing customer ID is OK; it means the subscriber never started to add a payment method, so we can skip cancelling
+    if (getResult.record.getProcessorCustomer().isPresent()) {
+      final ProcessorCustomer processorCustomer = getResult.record.getProcessorCustomer().get();
+      getProcessor(processorCustomer.processor()).cancelAllActiveSubscriptions(processorCustomer.customerId());
+    }
+    subscriptions.setCanceledAt(subscriberCredentials.subscriberUser(), subscriberCredentials.now());
+  }
+
+  /**
+   * Create or update a subscriber in the subscriptions table
+   * <p>
+   * If the subscriber does not exist, a subscriber with the provided credentials will be created. If the subscriber
+   * already exists, its last access time will be updated.
+   *
+   * @param subscriberCredentials Subscriber credentials derived from the subscriberId
+   * @param createPermitted Whether creating a new subscriber is permitted if one does not exist
+   * @throws PurchaseForbiddenException if the subscriber credentials were incorrect
+   * @throws SubscriberIdCreationNotPermittedException if a new subscriber ID would be created, but the caller does not permit it
+   */
+  public void updateSubscriber(final SubscriberCredentials subscriberCredentials, final boolean createPermitted)
+      throws PurchaseForbiddenException, SubscriberIdCreationNotPermittedException {
+    final Subscriptions.GetResult getResult =
+        subscriptions.get(subscriberCredentials.subscriberUser(), subscriberCredentials.hmac());
+
+    if (getResult == Subscriptions.GetResult.PASSWORD_MISMATCH) {
+      throw new PurchaseForbiddenException("subscriberId mismatch");
+    } else if (getResult == Subscriptions.GetResult.NOT_STORED) {
+
+      if (!createPermitted) {
+        throw new SubscriberIdCreationNotPermittedException();
+      }
+
+      // create a customer and write it to ddb
+      final Subscriptions.Record updatedRecord = subscriptions.create(subscriberCredentials.subscriberUser(),
+          subscriberCredentials.hmac(),
+          subscriberCredentials.now());
+      if (updatedRecord == null) {
+        throw new PurchaseForbiddenException("subscriberId mismatch");
+      }
+    } else {
+      // already exists so just touch access time and return
+      subscriptions.accessedAt(subscriberCredentials.subscriberUser(), subscriberCredentials.now());
+    }
+  }
+
+  public Optional<SubscriptionInformation> getSubscriptionInformation(
+      final SubscriberCredentials subscriberCredentials)
+      throws PurchaseForbiddenException, PurchaseNotFoundException, RateLimitExceededException {
+    final Subscriptions.Record record = getSubscriber(subscriberCredentials);
+    if (record.subscriptionId == null) {
+      return Optional.empty();
+    }
+    final SubscriptionPaymentProcessor manager = getProcessor(record.processorCustomer.processor());
+    return Optional.of(manager.getSubscriptionInformation(record.subscriptionId));
+  }
+
+  /**
+   * Get the subscriber record
+   *
+   * @param subscriberCredentials Subscriber credentials derived from the subscriberId
+   * @throws PurchaseForbiddenException if the subscriber credentials were incorrect
+   * @throws PurchaseNotFoundException  if the subscriber did not exist
+   */
+  public Subscriptions.Record getSubscriber(final SubscriberCredentials subscriberCredentials)
+      throws PurchaseForbiddenException, PurchaseNotFoundException {
+    final Subscriptions.GetResult getResult =
+        subscriptions.get(subscriberCredentials.subscriberUser(), subscriberCredentials.hmac());
+    if (getResult == Subscriptions.GetResult.PASSWORD_MISMATCH) {
+      throw new PurchaseForbiddenException("subscriberId mismatch");
+    } else if (getResult == Subscriptions.GetResult.NOT_STORED) {
+      throw new PurchaseNotFoundException();
+    } else {
+      return getResult.record;
+    }
+  }
+
+  public record ReceiptResult(
+      ReceiptCredentialResponse receiptCredentialResponse,
+      CustomerAwareSubscriptionPaymentProcessor.ReceiptItem receiptItem,
+      PaymentProvider paymentProvider) {}
+
+  /**
+   * Create a ZK receipt credential for a subscription that can be used to obtain the user entitlement
+   *
+   * @param subscriberCredentials         Subscriber credentials derived from the subscriberId
+   * @param receiptCredentialRequestBytes The raw bytes of the ZK Receipt credential request
+   * @param expiration                    A function that takes a
+   *                                      {@link CustomerAwareSubscriptionPaymentProcessor.ReceiptItem} and returns the
+   *                                      expiration time of the receipt
+   * @param userAgent                     The requesting client's user agent
+   * @return the requested ZK receipt credential
+   * @throws PurchaseForbiddenException                      if the subscriber credentials were incorrect
+   * @throws PurchaseNotFoundException                       if the subscriber did not exist or did not have a
+   *                                                             subscription attached
+   * @throws PurchaseInvalidArgumentsException               if the receipt credential request failed verification
+   * @throws PurchasePaymentRequiredException                if the subscription is in a state does not grant the
+   *                                                             user an entitlement
+   * @throws PurchaseReceiptRequestedForOpenPaymentException if a receipt was requested while a payment transaction
+   *                                                             was still open
+   * @throws PurchaseReceiptAlreadyRedeemedException         if the receipt was already redeemed by a different
+   *                                                             request
+   * @throws RateLimitExceededException                          if rate-limited
+   */
+  public ReceiptResult createReceiptCredential(
+      final SubscriberCredentials subscriberCredentials,
+      final byte[] receiptCredentialRequestBytes,
+      final Function<CustomerAwareSubscriptionPaymentProcessor.ReceiptItem, Instant> expiration,
+      @Nullable final String userAgent)
+      throws PurchaseForbiddenException, PurchaseNotFoundException, PurchaseInvalidArgumentsException, PurchasePaymentRequiredException, RateLimitExceededException, PurchaseReceiptRequestedForOpenPaymentException, PurchaseReceiptAlreadyRedeemedException {
+    final Subscriptions.Record record = getSubscriber(subscriberCredentials);
+    if (record.subscriptionId == null) {
+      throw new PurchaseNotFoundException();
+    }
+
+    final ReceiptCredentialRequest receiptCredentialRequest;
+    try {
+      receiptCredentialRequest = new ReceiptCredentialRequest(receiptCredentialRequestBytes);
+    } catch (final InvalidInputException e) {
+      throw new PurchaseInvalidArgumentsException("invalid receipt credential request", e);
+    }
+
+    final PaymentProvider processor = record.getProcessorCustomer().orElseThrow().processor();
+    final SubscriptionPaymentProcessor manager = getProcessor(processor);
+    final SubscriptionPaymentProcessor.ReceiptItem receipt = manager.getReceiptItem(record.subscriptionId);
+    final Instant expirationInstant = expiration.apply(receipt);
+    final ReceiptCredentialResponse receiptCredentialResponse;
+    try {
+      issuedReceiptsManager
+          .recordIssuance(receipt.itemId(), manager.getProvider(), receiptCredentialRequest, expirationInstant);
+      receiptCredentialResponse = zkReceiptOperations.issueReceiptCredential(
+          receiptCredentialRequest,
+          expirationInstant.getEpochSecond(),
+          receipt.level());
+    } catch (final VerificationFailedException e) {
+      throw new PurchaseInvalidArgumentsException("receipt credential request failed verification", e);
+    } catch (final WriteConflictException _) {
+      Metrics.counter(RECEIPT_ALREADY_REDEEMED_COUNTER_NAME, Tags.of(
+              Tag.of("receiptLevel", ReceiptLevel.lookupLevel(receipt.level())
+                  .map(ReceiptLevel::name)
+                  .orElse("n/a")),
+              UserAgentTagUtil.getPlatformTag(userAgent)))
+          .increment();
+      throw new PurchaseReceiptAlreadyRedeemedException();
+    }
+    return new ReceiptResult(receiptCredentialResponse, receipt, processor);
+  }
+
+  /**
+   * Add a payment method to a customer in a payment processor and update the table.
+   * <p>
+   * If the customer does not exist in the table, a customer is created via the subscriptionPaymentProcessor and added
+   * to the table. Not all payment processors support server-managed customers, so a payment processor that implements
+   * {@link CustomerAwareSubscriptionPaymentProcessor} must be passed in.
+   *
+   * @param subscriberCredentials        Subscriber credentials derived from the subscriberId
+   * @param subscriptionPaymentProcessor A customer-aware payment processor to use. If the subscriber already has a
+   *                                     payment processor, it must match the existing one.
+   * @param clientPlatform               The platform of the client making the request
+   * @param paymentSetupFunction         A function that takes the payment processor and the customer ID and begins
+   *                                     adding a payment method. The function should return something that allows the
+   *                                     client to configure the newly added payment method like a payment method setup
+   *                                     token.
+   * @param <T>                          A payment processor that has a notion of server-managed customers
+   * @param <R>                          The return type of the paymentSetupFunction, which should be used by a client
+   *                                     to configure the newly created payment method
+   * @param <E>                          An exception thrown by the paymentSetupFunction
+   * @return The return value of the paymentSetupFunction
+   * @throws PurchaseForbiddenException         if the subscriber credentials were incorrect
+   * @throws PurchaseNotFoundException          if the subscriber did not exist
+   * @throws PurchaseProcessorConflictException if the new payment processor does not match the existing processor associated with
+   *                                                the subscriberId
+   */
+  public <T extends CustomerAwareSubscriptionPaymentProcessor, R, E extends Exception> R addPaymentMethodToCustomer(
+      final SubscriberCredentials subscriberCredentials,
+      final T subscriptionPaymentProcessor,
+      final ClientPlatform clientPlatform,
+      final ThrowingBiFunction<T, String, R, E> paymentSetupFunction)
+      throws PurchaseForbiddenException, PurchaseNotFoundException, PurchaseProcessorConflictException, E {
+
+    Subscriptions.Record record = this.getSubscriber(subscriberCredentials);
+    if (record.getProcessorCustomer().isEmpty()) {
+      final ProcessorCustomer pc = subscriptionPaymentProcessor
+          .createCustomer(subscriberCredentials.subscriberUser(), clientPlatform);
+      record = subscriptions.setProcessorAndCustomerId(record,
+          new ProcessorCustomer(pc.customerId(), subscriptionPaymentProcessor.getProvider()),
+          Instant.now());
+    }
+    final ProcessorCustomer processorCustomer = record.getProcessorCustomer()
+        .orElseThrow(() -> new UncheckedIOException(new IOException("processor must now exist")));
+
+    if (processorCustomer.processor() != subscriptionPaymentProcessor.getProvider()) {
+      throw new PurchaseProcessorConflictException("existing processor does not match");
+    }
+    return paymentSetupFunction.apply(subscriptionPaymentProcessor, processorCustomer.customerId());
+  }
+
+  public interface LevelTransitionValidator {
+
+    /**
+     * Check is a level update is valid
+     *
+     * @param oldLevel The current level of the subscription
+     * @param newLevel The proposed updated level of the subscription
+     * @return true if the subscription can be changed from oldLevel to newLevel, otherwise false
+     */
+    boolean isTransitionValid(long oldLevel, long newLevel);
+  }
+
+  /**
+   * Update the subscription level in the payment processor and update the table.
+   * <p>
+   * If we don't have an existing subscription, create one in the payment processor and then update the table. If we do
+   * already have a subscription, and it does not match the requested subscription, update it in the payment processor
+   * and then update the table. When an update occurs, this is where a user's recurring charge to a payment method is
+   * created or modified.
+   *
+   * @param subscriberCredentials  Subscriber credentials derived from the subscriberId
+   * @param record                 A subscription record previous read with {@link #getSubscriber}
+   * @param processor              A subscription payment processor with a notion of server-managed customers
+   * @param level                  The desired subscription level
+   * @param currency               The desired currency type for the subscription
+   * @param idempotencyKey         An idempotencyKey that can be used to deduplicate requests within the payment
+   *                               processor
+   * @param subscriptionTemplateId Specifies the product associated with the provided level within the payment
+   *                               processor
+   * @param transitionValidator    A function that checks if the level update is valid
+   * @throws PurchaseInvalidArgumentsException  if the transitionValidator failed for the level transition, or the
+   *                                                subscription could not be created because the payment provider
+   *                                                requires additional action, or there was a failure because an
+   *                                                idempotency key was reused on a * modified request
+   * @throws PurchaseProcessorConflictException if the new payment processor the existing processor associated with
+   *                                                the subscriber
+   * @throws PurchaseProcessorException         if there was no payment method on the customer
+   */
+  public void updateSubscriptionLevelForCustomer(
+      final SubscriberCredentials subscriberCredentials,
+      final Subscriptions.Record record,
+      final CustomerAwareSubscriptionPaymentProcessor processor,
+      final long level,
+      final String currency,
+      final String idempotencyKey,
+      final String subscriptionTemplateId,
+      final LevelTransitionValidator transitionValidator)
+      throws PurchaseInvalidLevelException, PurchaseInvalidIdempotencyKeyException, PurchasePaymentRequiresActionException, PurchaseProcessorConflictException, PurchaseProcessorException {
+
+    if (record.subscriptionId != null) {
+      // we already have a subscription in our records so let's check the level and currency,
+      // and only change it if needed
+      final Object subscription = processor.getSubscription(record.subscriptionId);
+      final CustomerAwareSubscriptionPaymentProcessor.LevelAndCurrency existingLevelAndCurrency =
+          processor.getLevelAndCurrencyForSubscription(subscription);
+      final CustomerAwareSubscriptionPaymentProcessor.LevelAndCurrency desiredLevelAndCurrency =
+          new CustomerAwareSubscriptionPaymentProcessor.LevelAndCurrency(level, currency.toLowerCase(Locale.ROOT));
+      if (existingLevelAndCurrency.equals(desiredLevelAndCurrency)) {
+        return;
+      }
+      if (!transitionValidator.isTransitionValid(existingLevelAndCurrency.level(), level)) {
+        throw new PurchaseInvalidLevelException();
+      }
+      final CustomerAwareSubscriptionPaymentProcessor.SubscriptionId updatedSubscriptionId =
+          processor.updateSubscription(subscription, subscriptionTemplateId, level, idempotencyKey);
+
+      subscriptions.subscriptionLevelChanged(subscriberCredentials.subscriberUser(),
+          subscriberCredentials.now(),
+          level,
+          updatedSubscriptionId.id());
+    } else {
+      // Otherwise, we don't have a subscription yet so create it and then record the subscription id
+      long lastSubscriptionCreatedAt = record.subscriptionCreatedAt != null
+          ? record.subscriptionCreatedAt.getEpochSecond()
+          : 0;
+
+      final CustomerAwareSubscriptionPaymentProcessor.SubscriptionId subscription = processor.createSubscription(
+          record.processorCustomer.customerId(),
+          subscriptionTemplateId,
+          level,
+          lastSubscriptionCreatedAt);
+      subscriptions.subscriptionCreated(
+          subscriberCredentials.subscriberUser(), subscription.id(), subscriberCredentials.now(), level);
+
+    }
+  }
+
+  /**
+   * Check the provided play billing purchase token and write it the subscriptions table if is valid.
+   *
+   * @param subscriberCredentials    Subscriber credentials derived from the subscriberId
+   * @param googlePlayBillingManager Performs play billing API operations
+   * @param purchaseToken            The client provided purchaseToken that represents a purchased subscription in the
+   *                                 play store
+   * @return the subscription level for the accepted subscription
+   * @throws PurchaseForbiddenException         if the subscriber credentials were incorrect
+   * @throws PurchaseNotFoundException          if the subscriber did not exist, or the purchaseToken was not found
+   *                                                in the play store
+   * @throws PurchaseProcessorConflictException if the new payment processor does not match the existing processor associated with
+   *                                                the subscriberId
+   * @throws PurchasePaymentRequiredException   if the subscription is not in a state that grants the user an
+   *                                                entitlement
+   * @throws RateLimitExceededException             if rate-limited
+   */
+  public long updatePlayBillingPurchaseToken(
+      final SubscriberCredentials subscriberCredentials,
+      final GooglePlayBillingManager googlePlayBillingManager,
+      final String purchaseToken)
+      throws PurchaseProcessorConflictException, PurchaseForbiddenException, PurchaseNotFoundException, RateLimitExceededException, PurchasePaymentRequiredException {
+
+    // For IAP providers, the subscriptionId and the customerId are both just the purchaseToken. Changes to the
+    // subscription always just result in a new purchaseToken
+    final ProcessorCustomer pc = new ProcessorCustomer(purchaseToken, PaymentProvider.GOOGLE_PLAY_BILLING);
+
+    final Subscriptions.Record record = getSubscriber(subscriberCredentials);
+
+    // Check the record for an existing subscription
+    if (record.processorCustomer != null
+        && record.processorCustomer.processor() != PaymentProvider.GOOGLE_PLAY_BILLING) {
+      throw new PurchaseProcessorConflictException("existing processor does not match");
+    }
+
+    // If we're replacing an existing purchaseToken, cancel it first
+    if (record.processorCustomer != null && !purchaseToken.equals(record.processorCustomer.customerId())) {
+      googlePlayBillingManager.cancelAllActiveSubscriptions(record.processorCustomer.customerId());
+    }
+
+    // Validating ensures we don't allow a user-determined token that's totally bunk into the subscription manager,
+    // but we don't want to acknowledge it until it's successfully persisted.
+    final GooglePlayBillingManager.ValidatedToken validatedToken = googlePlayBillingManager.validateToken(purchaseToken);
+
+    // Store the valid purchaseToken with the subscriber
+    subscriptions.setIapPurchase(record, pc, purchaseToken, validatedToken.getLevel(), subscriberCredentials.now());
+
+    // Now that the purchaseToken is durable, we can acknowledge it
+    validatedToken.acknowledgePurchase();
+
+    return validatedToken.getLevel();
+  }
+
+  /**
+   * Check the provided app store transactionId and write it the subscriptions table if is valid.
+   *
+   * @param subscriberCredentials Subscriber credentials derived from the subscriberId
+   * @param appleAppStoreManager  Performs app store API operations
+   * @param originalTransactionId The client provided originalTransactionId that represents a purchased subscription in
+   *                              the app store
+   * @return the subscription level for the accepted subscription
+   * @throws PurchaseForbiddenException         if the subscriber credentials are incorrect
+   * @throws PurchaseNotFoundException          if the subscriber did not exist, or the originalTransactionId does
+   *                                                not exist
+   * @throws PurchaseProcessorConflictException if the new payment processor does not match the existing processor associated with
+   *                                                the subscriber
+   * @throws PurchaseInvalidArgumentsException  if the originalTransactionId is malformed or does not represent a
+   *                                                valid subscription
+   * @throws PurchasePaymentRequiredException   if the subscription is not in a state that grants the user an
+   *                                                entitlement
+   * @throws RateLimitExceededException             if rate-limited
+   */
+  public long updateAppStoreTransactionId(
+      final SubscriberCredentials subscriberCredentials,
+      final AppleAppStoreManager appleAppStoreManager,
+      final String originalTransactionId)
+      throws PurchaseForbiddenException, PurchaseNotFoundException, PurchaseProcessorConflictException, PurchaseInvalidArgumentsException, PurchasePaymentRequiredException, RateLimitExceededException {
+
+    final Subscriptions.Record record = getSubscriber(subscriberCredentials);
+    if (record.processorCustomer != null
+        && record.processorCustomer.processor() != PaymentProvider.APPLE_APP_STORE) {
+      throw new PurchaseProcessorConflictException("existing processor does not match");
+    }
+
+    // For IAP providers, the subscriptionId and the customerId are both just the identifier for the subscription in
+    // the provider (in this case, the originalTransactionId). Changes to the subscription always just result in a new
+    // originalTransactionId
+    final ProcessorCustomer pc = new ProcessorCustomer(originalTransactionId, PaymentProvider.APPLE_APP_STORE);
+
+    final Long level = appleAppStoreManager.validateTransaction(originalTransactionId);
+    subscriptions.setIapPurchase(record, pc, originalTransactionId, level, subscriberCredentials.now());
+    return level;
+  }
+
+  private SubscriptionPaymentProcessor getProcessor(PaymentProvider provider) {
+    return processors.get(provider);
   }
 }

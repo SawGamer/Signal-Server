@@ -8,8 +8,27 @@ Looking for protocol documentation? Check out the website!
 
 https://signal.org/docs/
 
-Cryptography Notice
+How to Build
 ------------
+
+This project uses [FoundationDB](https://www.foundationdb.org/) and requires the FoundationDB client library to be installed on the host system. With that in place, the server can be built and tested with:
+
+```shell script
+$ ./mvnw clean test
+```
+
+Security
+--------
+
+Security issues should be sent to <a href=mailto:security@signal.org>security@signal.org</a>.
+
+Help
+----
+
+We cannot provide direct technical support. Get help running this software in your own environment in our [unofficial community forum][community forum].
+
+Cryptography Notice
+-------------------
 
 This distribution includes cryptographic software. The country in which you currently reside may have restrictions on the import, possession, use, and/or re-export to another country, of encryption software.
 BEFORE using any encryption software, please check your country's laws, regulations and policies concerning the import, possession, or use, and re-export of encryption software, to see if this is permitted.
@@ -19,8 +38,10 @@ The U.S. Government Department of Commerce, Bureau of Industry and Security (BIS
 The form and manner of this distribution makes it eligible for export under the License Exception ENC Technology Software Unrestricted (TSU) exception (see the BIS Export Administration Regulations, Section 740.13) for both object code and source code.
 
 License
----------------------
+-------
 
-Copyright 2013-2023 Signal Messenger, LLC
+Copyright 2013 Signal Messenger, LLC
 
-Licensed under the AGPLv3: https://www.gnu.org/licenses/agpl-3.0.html
+Licensed under the GNU AGPLv3: https://www.gnu.org/licenses/agpl-3.0.html
+
+[community forum]: https://community.signalusers.org

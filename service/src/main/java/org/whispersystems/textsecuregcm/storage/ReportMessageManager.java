@@ -21,13 +21,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.util.UUIDUtil;
+import javax.annotation.Nullable;
 
 public class ReportMessageManager {
 
   private final ReportMessageDynamoDb reportMessageDynamoDb;
-  private final FaultTolerantRedisCluster rateLimitCluster;
+  private final FaultTolerantRedisClusterClient rateLimitCluster;
 
   private final Duration counterTtl;
 
@@ -40,7 +41,7 @@ public class ReportMessageManager {
   private static final Logger logger = LoggerFactory.getLogger(ReportMessageManager.class);
 
   public ReportMessageManager(final ReportMessageDynamoDb reportMessageDynamoDb,
-      final FaultTolerantRedisCluster rateLimitCluster,
+      final FaultTolerantRedisClusterClient rateLimitCluster,
       final Duration counterTtl) {
 
     this.reportMessageDynamoDb = reportMessageDynamoDb;
@@ -54,26 +55,24 @@ public class ReportMessageManager {
   }
 
   public void store(String sourceAci, UUID messageGuid) {
-
     try {
-      Objects.requireNonNull(sourceAci);
-
-      reportMessageDynamoDb.store(hash(messageGuid, sourceAci));
+      reportMessageDynamoDb.store(hash(messageGuid, Objects.requireNonNull(sourceAci)));
     } catch (final Exception e) {
       logger.warn("Failed to store hash", e);
     }
   }
 
+  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
   public void report(final Optional<String> sourceNumber,
-      final Optional<UUID> sourceAci,
+      final UUID sourceAci,
       final Optional<UUID> sourcePni,
       final UUID messageGuid,
       final UUID reporterUuid,
       final Optional<byte[]> reportSpamToken,
-      final String reporterUserAgent) {
+      @Nullable final String reporterUserAgent,
+      final boolean sourceAccountDeleted) {
 
-    final boolean found = sourceAci.map(uuid -> reportMessageDynamoDb.remove(hash(messageGuid, uuid.toString())))
-        .orElse(false);
+    final boolean found = reportMessageDynamoDb.remove(hash(messageGuid, sourceAci.toString()));
 
     Metrics.counter(REPORT_MESSAGE_COUNTER_NAME,
             Tags.of(FOUND_MESSAGE_TAG, String.valueOf(found),
@@ -89,21 +88,20 @@ public class ReportMessageManager {
           connection.sync().expire(reportedSenderKey, counterTtl.toSeconds());
         });
 
-        sourceAci.ifPresent(aci -> {
-          final String reportedSenderKey = getReportedSenderAciKey(aci);
+        {
+          final String reportedSenderKey = getReportedSenderAciKey(sourceAci);
           connection.sync().pfadd(reportedSenderKey, reporterUuid.toString());
           connection.sync().expire(reportedSenderKey, counterTtl.toSeconds());
-        });
+        }
       });
 
-      sourceNumber.ifPresent(number ->
-          reportedMessageListeners.forEach(listener -> {
-            try {
-              listener.handleMessageReported(number, messageGuid, reporterUuid, reportSpamToken);
-            } catch (final Exception e) {
-              logger.error("Failed to notify listener of reported message", e);
-            }
-          }));
+      reportedMessageListeners.forEach(listener -> {
+        try {
+          listener.handleMessageReported(sourceNumber, messageGuid, reporterUuid, reportSpamToken, sourceAccountDeleted);
+        } catch (final Exception e) {
+          logger.error("Failed to notify listener of reported message", e);
+        }
+      });
     }
   }
 
@@ -120,8 +118,8 @@ public class ReportMessageManager {
       return rateLimitCluster.withCluster(
           connection ->
               Math.max(
-                  connection.sync().pfcount(getReportedSenderPniKey(account.getPhoneNumberIdentifier())).intValue(),
-                  connection.sync().pfcount(getReportedSenderAciKey(account.getUuid())).intValue()));
+                  account.getPhoneNumberIdentifier().map(pni -> connection.sync().pfcount(getReportedSenderPniKey(pni)).intValue()).orElse(0),
+                  connection.sync().pfcount(getReportedSenderAciKey(account.getAccountIdentifier())).intValue()));
     } catch (final RedisException e) {
       return 0;
     }

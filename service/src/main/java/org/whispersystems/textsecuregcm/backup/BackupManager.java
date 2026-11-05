@@ -6,12 +6,15 @@
 package org.whispersystems.textsecuregcm.backup;
 
 import com.google.common.annotations.VisibleForTesting;
-import io.grpc.Status;
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Metrics;
-import java.net.URI;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -19,64 +22,96 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.stream.Collectors;
+import java.util.function.Function;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
-import org.signal.libsignal.protocol.InvalidKeyException;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialPresentation;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
+import org.signal.libsignal.zkgroup.backups.BackupLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.attachments.AttachmentGenerator;
+import org.whispersystems.textsecuregcm.attachments.AttachmentUtil;
+import org.whispersystems.textsecuregcm.attachments.TusAttachmentGenerator;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedBackupUser;
+import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
+import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
+import org.whispersystems.textsecuregcm.configuration.BackupConfiguration;
+import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
+import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
+import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecoveryClient;
 import org.whispersystems.textsecuregcm.util.ExceptionUtils;
+import org.whispersystems.textsecuregcm.util.Pair;
+import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
+import org.whispersystems.textsecuregcm.util.ua.UserAgent;
+import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
 
 public class BackupManager {
 
-  private static final Logger logger = LoggerFactory.getLogger(BackupManager.class);
-
-  static final String MEDIA_DIRECTORY_NAME = "media";
   static final String MESSAGE_BACKUP_NAME = "messageBackup";
-  static final long MAX_TOTAL_BACKUP_MEDIA_BYTES = 1024L * 1024L * 1024L * 50L;
-  static final long MAX_MEDIA_OBJECT_SIZE = 1024L * 1024L * 101L;
-  // If the last media usage recalculation is over MAX_QUOTA_STALENESS, force a recalculation before quota enforcement.
-  static final Duration MAX_QUOTA_STALENESS = Duration.ofDays(1);
+
+  private static final int DEFAULT_LIST_MEDIA_LIMIT = 1000;
+
   private static final String ZK_AUTHN_COUNTER_NAME = MetricsUtil.name(BackupManager.class, "authentication");
   private static final String ZK_AUTHZ_FAILURE_COUNTER_NAME = MetricsUtil.name(BackupManager.class,
       "authorizationFailure");
   private static final String USAGE_RECALCULATION_COUNTER_NAME = MetricsUtil.name(BackupManager.class,
       "usageRecalculation");
+  private static final String DELETE_COUNT_DISTRIBUTION_NAME = MetricsUtil.name(BackupManager.class,
+      "deleteCount");
+  private static final Timer SYNCHRONOUS_DELETE_TIMER =
+      Metrics.timer(MetricsUtil.name(BackupManager.class, "synchronousDelete"));
+
+  private static final String NUM_OBJECTS_SUMMARY_NAME = MetricsUtil.name(BackupManager.class, "numObjects");
+  private static final String BYTES_USED_SUMMARY_NAME = MetricsUtil.name(BackupManager.class, "bytesUsed");
+
   private static final String SUCCESS_TAG_NAME = "success";
   private static final String FAILURE_REASON_TAG_NAME = "reason";
 
+  private static final Logger log = LoggerFactory.getLogger(BackupManager.class);
+
   private final BackupsDb backupsDb;
   private final GenericServerSecretParams serverSecretParams;
+  private final RateLimiters rateLimiters;
+  private final TusAttachmentGenerator tusAttachmentGenerator;
   private final Cdn3BackupCredentialGenerator cdn3BackupCredentialGenerator;
   private final RemoteStorageManager remoteStorageManager;
-  private final Map<Integer, String> attachmentCdnBaseUris;
+  private final SecureRandom secureRandom = new SecureRandom();
+  private final ExternalServiceCredentialsGenerator secureValueRecoveryBCredentialsGenerator;
+  private final SecureValueRecoveryClient secureValueRecoveryBClient;
   private final Clock clock;
-
+  private final BackupConfiguration backupConfiguration;
 
   public BackupManager(
       final BackupsDb backupsDb,
       final GenericServerSecretParams serverSecretParams,
+      final RateLimiters rateLimiters,
+      final TusAttachmentGenerator tusAttachmentGenerator,
       final Cdn3BackupCredentialGenerator cdn3BackupCredentialGenerator,
       final RemoteStorageManager remoteStorageManager,
-      final Map<Integer, String> attachmentCdnBaseUris,
-      final Clock clock) {
+      final ExternalServiceCredentialsGenerator secureValueRecoveryBCredentialsGenerator,
+      final SecureValueRecoveryClient secureValueRecoveryBClient,
+      final Clock clock,
+      final BackupConfiguration backupConfiguration) {
     this.backupsDb = backupsDb;
     this.serverSecretParams = serverSecretParams;
+    this.rateLimiters = rateLimiters;
+    this.tusAttachmentGenerator = tusAttachmentGenerator;
     this.cdn3BackupCredentialGenerator = cdn3BackupCredentialGenerator;
     this.remoteStorageManager = remoteStorageManager;
+    this.secureValueRecoveryBClient = secureValueRecoveryBClient;
     this.clock = clock;
-    // strip trailing "/" for easier URI construction
-    this.attachmentCdnBaseUris = attachmentCdnBaseUris.entrySet().stream().collect(Collectors.toMap(
-        Map.Entry::getKey,
-        entry -> StringUtils.removeEnd(entry.getValue(), "/")
-    ));
+    this.secureValueRecoveryBCredentialsGenerator = secureValueRecoveryBCredentialsGenerator;
+    this.backupConfiguration = backupConfiguration;
   }
 
 
@@ -89,34 +124,30 @@ public class BackupManager {
    * @param presentation a ZK credential presentation that encodes the backupId
    * @param signature    the signature of the presentation
    * @param publicKey    the public key of a key-pair that the presentation must be signed with
+   * @throws BackupFailedZkAuthenticationException If the provided presentation or signature were invalid
    */
-  public CompletableFuture<Void> setPublicKey(
+  public void setPublicKey(
       final BackupAuthCredentialPresentation presentation,
       final byte[] signature,
-      final ECPublicKey publicKey) {
+      final ECPublicKey publicKey) throws BackupFailedZkAuthenticationException {
 
     // Note: this is a special case where we can't validate the presentation signature against the stored public key
     // because we are currently setting it. We check against the provided public key, but we must also verify that
     // there isn't an existing, different stored public key for the backup-id (verified with a condition expression)
-    final BackupTier backupTier = verifySignatureAndCheckPresentation(presentation, signature, publicKey);
-    if (backupTier.compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support setting public key")
-          .asRuntimeException();
-    }
-    return backupsDb.setPublicKey(presentation.getBackupId(), backupTier, publicKey)
-        .exceptionally(ExceptionUtils.exceptionallyHandler(PublicKeyConflictException.class, ex -> {
+    final Pair<BackupCredentialType, BackupLevel> credentialTypeAndBackupLevel =
+        verifyPresentation(presentation).verifySignature(signature, publicKey);
+
+    ExceptionUtils.unwrapSupply(
+        BackupPublicKeyConflictException.class,
+        () -> backupsDb.setPublicKey(presentation.getBackupId(), credentialTypeAndBackupLevel.second(), publicKey).join(),
+        _ -> {
           Metrics.counter(ZK_AUTHN_COUNTER_NAME,
                   SUCCESS_TAG_NAME, String.valueOf(false),
                   FAILURE_REASON_TAG_NAME, "public_key_conflict")
               .increment();
-          throw Status.UNAUTHENTICATED
-              .withDescription("public key does not match existing public key for the backup-id")
-              .asRuntimeException();
-        }));
+          return new BackupFailedZkAuthenticationException("The provided public key did not match the stored public key");
+        });
   }
-
 
   /**
    * Create a form that may be used to upload a backup file for the backupId encoded in the presentation.
@@ -124,93 +155,93 @@ public class BackupManager {
    * If successful, this also updates the TTL of the backup.
    *
    * @param backupUser an already ZK authenticated backup user
+   * @param uploadSize the maximum size of a message backup that can be uploaded with the returned form
    * @return the upload form
+   * @throws BackupPermissionException if the credential does not have the correct level
+   * @throws BackupWrongCredentialTypeException if the credential does not have the messages type
    */
-  public CompletableFuture<MessageBackupUploadDescriptor> createMessageBackupUploadDescriptor(
-      final AuthenticatedBackupUser backupUser) {
+  public BackupUploadDescriptor createMessageBackupUploadDescriptor(
+      final AuthenticatedBackupUser backupUser,
+      final long uploadSize) throws BackupPermissionException, BackupWrongCredentialTypeException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    checkBackupCredentialType(backupUser, BackupCredentialType.MESSAGES);
+
     // this could race with concurrent updates, but the only effect would be last-writer-wins on the timestamp
-    return backupsDb
-        .addMessageBackup(backupUser)
-        .thenApply(result -> cdn3BackupCredentialGenerator.generateUpload(cdnMessageBackupName(backupUser)));
+    backupsDb.addMessageBackup(backupUser).join();
+    return cdn3BackupCredentialGenerator.generateUpload(cdnMessageBackupName(backupUser), uploadSize);
+  }
+
+  public BackupUploadDescriptor createTemporaryAttachmentUploadDescriptor(
+      final AuthenticatedBackupUser backupUser,
+      final long uploadSize)
+      throws RateLimitExceededException, BackupPermissionException, BackupWrongCredentialTypeException {
+    checkBackupLevel(backupUser, BackupLevel.PAID);
+    checkBackupCredentialType(backupUser, BackupCredentialType.MEDIA);
+
+    rateLimiters.forDescriptor(RateLimiters.For.BACKUP_ATTACHMENT).validate(rateLimitKey(backupUser));
+    final String attachmentKey = AttachmentUtil.generateAttachmentKey(secureRandom);
+    final AttachmentGenerator.Descriptor descriptor =
+        tusAttachmentGenerator.generateAttachment(attachmentKey, uploadSize);
+    return new BackupUploadDescriptor(3, attachmentKey, descriptor.headers(), descriptor.signedUploadLocation());
   }
 
   /**
    * Update the last update timestamps for the backupId in the presentation
    *
    * @param backupUser an already ZK authenticated backup user
+   * @throws BackupPermissionException if the credential does not have the correct level
    */
-  public CompletableFuture<Void> ttlRefresh(final AuthenticatedBackupUser backupUser) {
-    if (backupUser.backupTier().compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support ttl operation")
-          .asRuntimeException();
-    }
+  public void ttlRefresh(final AuthenticatedBackupUser backupUser) throws BackupPermissionException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
     // update message backup TTL
-    return backupsDb.ttlRefresh(backupUser);
+    final StoredBackupAttributes storedBackupAttributes = backupsDb.ttlRefresh(backupUser).join();
+    if (backupUser.credentialType() == BackupCredentialType.MEDIA) {
+      final long maxTotalMediaSize = backupConfiguration.maxTotalMediaSize();
+
+      // Report that the backup is out of quota if it is within 100MiB of the limit
+      final boolean quotaExhausted = storedBackupAttributes.bytesUsed() >=
+          (maxTotalMediaSize - 1024 * 1024 * 100);
+
+      final Tags tags = Tags.of(
+          UserAgentTagUtil.getPlatformTag(backupUser.userAgent()),
+          Tag.of("type", backupUser.credentialType().name()),
+          Tag.of("tier", backupUser.backupLevel().name()),
+          Tag.of("quotaExhausted", String.valueOf(quotaExhausted)));
+
+      DistributionSummary.builder(NUM_OBJECTS_SUMMARY_NAME)
+          .tags(tags)
+          .register(Metrics.globalRegistry)
+          .record(storedBackupAttributes.numObjects());
+      DistributionSummary.builder(BYTES_USED_SUMMARY_NAME)
+          .tags(tags)
+          .register(Metrics.globalRegistry)
+          .record(storedBackupAttributes.bytesUsed());
+    }
   }
 
-  public record BackupInfo(int cdn, String backupSubdir, String messageBackupKey, Optional<Long> mediaUsedSpace) {}
+  public record BackupInfo(int cdn, String backupSubdir, String mediaSubdir, String messageBackupKey,
+                           Optional<Long> mediaUsedSpace) {}
 
   /**
    * Retrieve information about the existing backup
    *
    * @param backupUser an already ZK authenticated backup user
    * @return Information about the existing backup
+   * @throws BackupPermissionException if the credential does not have the correct level
+   * @throws BackupFailedZkAuthenticationException if the provided backupuser does not exist
    */
-  public CompletableFuture<BackupInfo> backupInfo(final AuthenticatedBackupUser backupUser) {
-    if (backupUser.backupTier().compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED.withDescription("credential does not support info operation")
-          .asRuntimeException();
-    }
-    return backupsDb.describeBackup(backupUser)
-        .thenApply(backupDescription -> new BackupInfo(
-            backupDescription.cdn(),
-            encodeBackupIdForCdn(backupUser),
-            MESSAGE_BACKUP_NAME,
-            backupDescription.mediaUsedSpace()));
+  public BackupInfo backupInfo(final AuthenticatedBackupUser backupUser) throws BackupPermissionException, BackupFailedZkAuthenticationException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    final BackupsDb.BackupDescription backupDescription = ExceptionUtils.unwrapSupply(
+        BackupFailedZkAuthenticationException.class,
+        () -> backupsDb.describeBackup(backupUser).join());
+    return new BackupInfo(
+        backupDescription.cdn(),
+        backupUser.backupDir(),
+        backupUser.mediaDir(),
+        MESSAGE_BACKUP_NAME,
+        backupDescription.mediaUsedSpace());
   }
-
-  /**
-   * Check if there is enough capacity to store the requested amount of media
-   *
-   * @param backupUser  an already ZK authenticated backup user
-   * @param mediaLength the desired number of media bytes to store
-   * @return true if mediaLength bytes can be stored
-   */
-  public CompletableFuture<Boolean> canStoreMedia(final AuthenticatedBackupUser backupUser, final long mediaLength) {
-    if (backupUser.backupTier().compareTo(BackupTier.MEDIA) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support storing media")
-          .asRuntimeException();
-    }
-    return backupsDb.getMediaUsage(backupUser)
-        .thenComposeAsync(info -> {
-          final boolean canStore = MAX_TOTAL_BACKUP_MEDIA_BYTES - info.usageInfo().bytesUsed() >= mediaLength;
-          if (canStore || info.lastRecalculationTime().isAfter(clock.instant().minus(MAX_QUOTA_STALENESS))) {
-            return CompletableFuture.completedFuture(canStore);
-          }
-
-          // The user is out of quota, and we have not recently recalculated the user's usage. Double check by doing a
-          // hard recalculation before actually forbidding the user from storing additional media.
-          return this.remoteStorageManager.calculateBytesUsed(cdnMediaDirectory(backupUser))
-              .thenCompose(usage -> backupsDb
-                  .setMediaUsage(backupUser, usage)
-                  .thenApply(ignored -> usage))
-              .whenComplete((newUsage, throwable) -> {
-                boolean usageChanged = throwable == null && !newUsage.equals(info.usageInfo());
-                Metrics.counter(USAGE_RECALCULATION_COUNTER_NAME, "usageChanged", String.valueOf(usageChanged))
-                    .increment();
-              })
-              .thenApply(newUsage -> MAX_TOTAL_BACKUP_MEDIA_BYTES - newUsage.bytesUsed() >= mediaLength);
-        });
-  }
-
-  public record StorageDescriptor(int cdn, byte[] key) {}
-
-  public record StorageDescriptorWithLength(int cdn, byte[] key, long length) {}
 
   /**
    * Copy an encrypted object to the backup cdn, adding a layer of encryption
@@ -219,94 +250,202 @@ public class BackupManager {
    * will also be deducted from the user's quota. </p>
    * <p>
    * However, the converse isn't true. It's possible we may charge the user for media they failed to copy. As a result,
-   * the quota may be over reported and it should be recalculated before taking quota enforcement actions.
+   * the quota may be over reported. It should be recalculated before taking quota enforcement actions.
    *
-   * @return A stage that completes successfully with location of the twice-encrypted object on the backup cdn. The
-   * returned CompletionStage can be completed exceptionally with the following exceptions.
-   * <ul>
-   *  <li> {@link InvalidLengthException} If the expectedSourceLength does not match the length of the sourceUri </li>
-   *  <li> {@link SourceObjectNotFoundException} If the no object at sourceUri is found </li>
-   *  <li> {@link java.io.IOException} If there was a generic IO issue </li>
-   * </ul>
+   * @return A Flux that emits the locations of the double-encrypted objects on the backup cdn, or includes an error
+   * detailing why the object could not be copied.
    */
-  public CompletableFuture<StorageDescriptor> copyToBackup(
-      final AuthenticatedBackupUser backupUser,
-      final int sourceCdn,
-      final String sourceKey,
-      final int sourceLength,
-      final MediaEncryptionParameters encryptionParameters,
-      final byte[] destinationMediaId) {
-    if (backupUser.backupTier().compareTo(BackupTier.MEDIA) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support storing media")
-          .asRuntimeException();
+  public Flux<CopyResult> copyToBackup(final CopyQuota copyQuota) {
+    final AuthenticatedBackupUser backupUser = copyQuota.backupUser();
+
+    return Flux.concat(
+
+        // Perform copies for requests that fit in our quota, first updating the usage. If the copy fails, our
+        // estimated quota usage may not be exact since we update usage first. We make a best-effort attempt
+        // to undo the usage update if we know that the copied failed for sure.
+        Flux.fromIterable(copyQuota.requestsToCopy())
+
+            // Update the usage in reasonable chunk sizes to bound how out of sync our claimed and actual usage gets
+            .buffer(backupConfiguration.usageCheckpointCount())
+            .concatMap(copyParameters -> {
+              final long quotaToConsume = copyParameters.stream()
+                  .mapToLong(CopyParameters::destinationObjectSize)
+                  .sum();
+              return Mono
+                  .fromFuture(backupsDb.trackMedia(backupUser, copyParameters.size(), quotaToConsume))
+                  .thenMany(Flux.fromIterable(copyParameters));
+            })
+
+            // Actually perform the copies now that we've updated the quota
+            .flatMapSequential(copyParams -> copyToBackup(backupUser, copyParams)
+                    .flatMap(copyResult -> switch (copyResult.outcome()) {
+                      case SUCCESS -> Mono.just(copyResult);
+                      case SOURCE_WRONG_LENGTH, SOURCE_NOT_FOUND, OUT_OF_QUOTA -> Mono
+                          .fromFuture(this.backupsDb.trackMedia(backupUser, -1, -copyParams.destinationObjectSize()))
+                          .thenReturn(copyResult);
+                    }),
+                backupConfiguration.copyConcurrency(), 1),
+
+        // There wasn't enough quota remaining to perform these copies
+        Flux.fromIterable(copyQuota.requestsToReject())
+            .map(arg -> new CopyResult(CopyResult.Outcome.OUT_OF_QUOTA, arg.destinationMediaId(), null)));
+  }
+
+  private Mono<CopyResult> copyToBackup(final AuthenticatedBackupUser backupUser, final CopyParameters copyParameters) {
+    return Mono.fromCompletionStage(() -> remoteStorageManager.copy(
+            copyParameters.sourceCdn(), copyParameters.sourceKey(), copyParameters.sourceLength(),
+            copyParameters.encryptionParameters(),
+            cdnMediaPath(backupUser, copyParameters.destinationMediaId())))
+
+        // Successfully copied!
+        .thenReturn(new CopyResult(
+            CopyResult.Outcome.SUCCESS, copyParameters.destinationMediaId(), remoteStorageManager.cdnNumber()))
+
+        // Otherwise, squash per-item copy errors that don't fail the entire operation
+        .onErrorResume(
+            // If the error maps to an explicit result type
+            throwable ->
+                CopyResult.fromCopyError(throwable, copyParameters.destinationMediaId()).isPresent(),
+            // return that result type instead of propagating the error
+            throwable ->
+                Mono.just(CopyResult.fromCopyError(throwable, copyParameters.destinationMediaId()).orElseThrow()));
+  }
+
+  public record CopyQuota(AuthenticatedBackupUser backupUser, List<CopyParameters> requestsToCopy, List<CopyParameters> requestsToReject) {
+    private static CopyQuota create(AuthenticatedBackupUser backupUser, final List<CopyParameters> toCopy, long remainingQuota) {
+      // Figure out how many of the requested objects fit in the remaining quota
+      final int index = indexWhereTotalExceeds(toCopy, CopyParameters::destinationObjectSize, remainingQuota);
+      return new CopyQuota(backupUser, toCopy.subList(0, index), toCopy.subList(index, toCopy.size()));
     }
-    if (sourceLength > MAX_MEDIA_OBJECT_SIZE) {
-      throw Status.INVALID_ARGUMENT
-          .withDescription("Invalid sourceObject size")
-          .asRuntimeException();
-    }
-
-    final MessageBackupUploadDescriptor dst = cdn3BackupCredentialGenerator.generateUpload(
-        cdnMediaPath(backupUser, destinationMediaId));
-
-    final int destinationLength = encryptionParameters.outputSize(sourceLength);
-
-    final URI sourceUri = attachmentReadUri(sourceCdn, sourceKey);
-    return this.backupsDb
-        // Write the ddb updates before actually updating backing storage
-        .trackMedia(backupUser, 1, destinationLength)
-
-        // Actually copy the objects. If the copy fails, our estimated quota usage may not be exact
-        .thenComposeAsync(ignored -> remoteStorageManager.copy(sourceUri, sourceLength, encryptionParameters, dst))
-        .exceptionallyCompose(throwable -> {
-          final Throwable unwrapped = ExceptionUtils.unwrap(throwable);
-          if (!(unwrapped instanceof SourceObjectNotFoundException) && !(unwrapped instanceof InvalidLengthException)) {
-            throw ExceptionUtils.wrap(unwrapped);
-          }
-          // In cases where we know the copy fails without writing anything, we can try to restore the user's quota
-          return this.backupsDb.trackMedia(backupUser, -1, -destinationLength).whenComplete((ignored, ignoredEx) -> {
-            throw ExceptionUtils.wrap(unwrapped);
-          });
-        })
-        // indicates where the backup was stored
-        .thenApply(ignore -> new StorageDescriptor(dst.cdn(), destinationMediaId));
-
   }
 
   /**
-   * Construct the URI for an attachment with the specified key
+   * Determine which copy requests can be performed with the user's remaining quota. This does not update the quota.
    *
-   * @param cdn where the attachment is located
-   * @param key the attachment key
-   * @return A {@link URI} where the attachment can be retrieved
+   * @param toCopy     The proposed copy requests
+   * @return QuotaResult indicating which requests fit into the remaining quota and which requests should be
+   * rejected with {@link CopyResult.Outcome#OUT_OF_QUOTA}
+   * @throws BackupInvalidArgumentException if toCopy contains an invalid copy request
+   * @throws BackupPermissionException if the credential does not have the correct level
+   * @throws BackupWrongCredentialTypeException if the credential does not have the media type
    */
-  private URI attachmentReadUri(final int cdn, final String key) {
-    final String baseUri = attachmentCdnBaseUris.get(cdn);
-    if (baseUri == null) {
-      throw Status.INVALID_ARGUMENT.withDescription("Unknown cdn " + cdn).asRuntimeException();
+  public CopyQuota getCopyQuota(
+      final AuthenticatedBackupUser backupUser,
+      final List<CopyParameters> toCopy,
+      final long maximumSourceObjectSize)
+      throws BackupWrongCredentialTypeException, BackupPermissionException, BackupInvalidArgumentException {
+    checkBackupLevel(backupUser, BackupLevel.PAID);
+    checkBackupCredentialType(backupUser, BackupCredentialType.MEDIA);
+
+    for (CopyParameters copyParameters : toCopy) {
+      if (copyParameters.sourceLength() > maximumSourceObjectSize || copyParameters.sourceLength() < 0) {
+        throw new BackupInvalidArgumentException("Invalid sourceObject size");
+      }
     }
-    return URI.create("%s/%s".formatted(baseUri, key));
+    final long totalBytesAdded = toCopy.stream().mapToLong(CopyParameters::destinationObjectSize).sum();
+
+    final Duration maxQuotaStaleness = backupConfiguration.maxQuotaStaleness();
+    final long maxTotalMediaSize = backupConfiguration.maxTotalMediaSize();
+
+    final BackupsDb.TimestampedUsageInfo info = backupsDb.getMediaUsage(backupUser).join();
+    long estimatedRemainingQuota = maxTotalMediaSize - info.usageInfo().bytesUsed();
+    final boolean canStore = estimatedRemainingQuota >= totalBytesAdded;
+    if (canStore || info.lastRecalculationTime().isAfter(clock.instant().minus(maxQuotaStaleness))) {
+      return CopyQuota.create(backupUser, toCopy, estimatedRemainingQuota);
+    }
+
+    // The user is out of quota, and we have not recently recalculated the user's usage. Double check by doing a
+    // hard recalculation before actually forbidding the user from storing additional media.
+    boolean usageChanged = false;
+    try {
+      final UsageInfo usage =
+          this.remoteStorageManager.calculateBytesUsed(cdnMediaDirectory(backupUser)).toCompletableFuture().join();
+      backupsDb.setMediaUsage(backupUser, usage).join();
+      usageChanged = !usage.equals(info.usageInfo());
+
+      final long remainingQuota = maxTotalMediaSize - usage.bytesUsed();
+      return CopyQuota.create(backupUser, toCopy, remainingQuota);
+    } finally {
+      Metrics.counter(USAGE_RECALCULATION_COUNTER_NAME, Tags.of(
+              UserAgentTagUtil.getPlatformTag(backupUser.userAgent()),
+              Tag.of("usageChanged", String.valueOf(usageChanged))))
+          .increment();
+    }
   }
+
+  public record RecalculationResult(UsageInfo oldUsage, UsageInfo newUsage) {}
+  public CompletionStage<Optional<RecalculationResult>> recalculateQuota(final StoredBackupAttributes storedBackupAttributes) {
+    if (StringUtils.isBlank(storedBackupAttributes.backupDir()) || StringUtils.isBlank(storedBackupAttributes.mediaDir())) {
+      return CompletableFuture.completedFuture(Optional.empty());
+    }
+    final String cdnPath = cdnMediaDirectory(storedBackupAttributes.backupDir(), storedBackupAttributes.mediaDir());
+    return this.remoteStorageManager.calculateBytesUsed(cdnPath).thenCompose(usage ->
+      backupsDb.setMediaUsage(storedBackupAttributes, usage).thenApply(ignored ->
+          Optional.of(new RecalculationResult(
+              new UsageInfo(storedBackupAttributes.bytesUsed(), storedBackupAttributes.numObjects()),
+              usage))));
+  }
+
+  /**
+   * @return the largest index i such that sum(ts[0],...ts[i - 1]) <= max
+   */
+  private static <T> int indexWhereTotalExceeds(List<T> ts, Function<T, Long> valueFunction, long max) {
+    long sum = 0;
+    for (int index = 0; index < ts.size(); index++) {
+      sum += valueFunction.apply(ts.get(index));
+      if (sum > max) {
+        return index;
+      }
+    }
+    return ts.size();
+  }
+
+
+  public record StorageDescriptor(int cdn, byte[] key) {}
+
+  public record StorageDescriptorWithLength(int cdn, byte[] key, long length) {}
 
   /**
    * Generate credentials that can be used to read from the backup CDN
    *
    * @param backupUser an already ZK authenticated backup user
+   * @param cdnNumber  the cdn number to get backup credentials for
    * @return A map of headers to include with CDN requests
+   * @throws BackupPermissionException if the credential does not have the correct level
+   * @throws BackupInvalidArgumentException if the provided cdnNumber is invalid
    */
-  public Map<String, String> generateReadAuth(final AuthenticatedBackupUser backupUser) {
-    if (backupUser.backupTier().compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support read auth operation")
-          .asRuntimeException();
+  public Map<String, String> generateReadAuth(final AuthenticatedBackupUser backupUser, final int cdnNumber)
+      throws BackupInvalidArgumentException, BackupPermissionException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    if (cdnNumber != 3) {
+      throw new BackupInvalidArgumentException("unknown cdn");
     }
-    final String encodedBackupId = encodeBackupIdForCdn(backupUser);
-    return cdn3BackupCredentialGenerator.readHeaders(encodedBackupId);
+    return cdn3BackupCredentialGenerator.readHeaders(backupUser.backupDir());
   }
 
+  /**
+   * Generate credentials that can be used with SVRB
+   *
+   * @param backupUser an already ZK authenticated backup user
+   * @return the credential that may be used with SVRB
+   * @throws BackupPermissionException if the credential does not have the correct level
+   * @throws BackupWrongCredentialTypeException if the credential does not have the messages type
+   */
+  public ExternalServiceCredentials generateSvrbAuth(final AuthenticatedBackupUser backupUser)
+      throws BackupPermissionException, BackupWrongCredentialTypeException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    // Clients may only use SVRB with their messages backup-id
+    checkBackupCredentialType(backupUser, BackupCredentialType.MESSAGES);
+    return secureValueRecoveryBCredentialsGenerator.generateFor(svrbIdentifier(backupUser));
+  }
+
+  private static String svrbIdentifier(final AuthenticatedBackupUser backupUser) {
+    return svrbIdentifier(BackupsDb.hashedBackupId(backupUser.backupId()));
+  }
+
+  private static String svrbIdentifier(final byte[] hashedBackupId) {
+    return HexFormat.of().formatHex(hashedBackupId);
+  }
 
   /**
    * List of media stored for a particular backup id
@@ -321,102 +460,150 @@ public class BackupManager {
    *
    * @param backupUser An already ZK authenticated backup user
    * @param cursor     A cursor returned by a previous call that can be used to resume listing
-   * @param limit      The maximum number of list results to return
+   * @param limit      The maximum number of list results to return, or empty to use
+   *                   {@link #DEFAULT_LIST_MEDIA_LIMIT}
    * @return A {@link ListMediaResult}
+   * @throws BackupPermissionException if the credential does not have the correct level
    */
-  public CompletionStage<ListMediaResult> list(
+  public ListMediaResult list(
       final AuthenticatedBackupUser backupUser,
       final Optional<String> cursor,
-      final int limit) {
-    if (backupUser.backupTier().compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support list operation")
-          .asRuntimeException();
-    }
-    return remoteStorageManager.list(cdnMediaDirectory(backupUser), cursor, limit)
-        .thenApply(result ->
-            new ListMediaResult(
-                result
-                    .objects()
-                    .stream()
-                    .map(entry -> new StorageDescriptorWithLength(
-                        remoteStorageManager.cdnNumber(),
-                        decodeFromCdn(entry.key()),
-                        entry.length()
-                    ))
-                    .toList(),
-                result.cursor()
-            ));
-  }
-
-
-  private sealed interface Either permits DeleteSuccess, DeleteFailure {}
-
-  private record DeleteSuccess(long usage) implements Either {}
-
-  private record DeleteFailure(Throwable e) implements Either {}
-
-  public CompletableFuture<Void> delete(final AuthenticatedBackupUser backupUser,
-      final List<StorageDescriptor> storageDescriptors) {
-    if (backupUser.backupTier().compareTo(BackupTier.MESSAGES) < 0) {
-      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME).increment();
-      throw Status.PERMISSION_DENIED
-          .withDescription("credential does not support list operation")
-          .asRuntimeException();
-    }
-
-    if (storageDescriptors.stream().anyMatch(sd -> sd.cdn() != remoteStorageManager.cdnNumber())) {
-      throw Status.INVALID_ARGUMENT
-          .withDescription("unsupported media cdn provided")
-          .asRuntimeException();
-    }
-
-    return Flux
-        .fromIterable(storageDescriptors)
-
-        // Issue deletes for all storage descriptors (proceeds with default flux concurrency)
-        .flatMap(descriptor -> Mono.fromCompletionStage(
-            remoteStorageManager
-                .delete(cdnMediaPath(backupUser, descriptor.key))
-                // Squash errors/success into a single type
-                .handle((bytesDeleted, throwable) -> throwable != null
-                    ? new DeleteFailure(throwable)
-                    : new DeleteSuccess(bytesDeleted))
+      final Optional<Integer> limit) throws BackupPermissionException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    final RemoteStorageManager.ListResult result = remoteStorageManager
+        .list(cdnMediaDirectory(backupUser), cursor, limit.orElse(DEFAULT_LIST_MEDIA_LIMIT))
+        .toCompletableFuture().join();
+    return new ListMediaResult(result
+        .objects()
+        .stream()
+        .map(entry -> new StorageDescriptorWithLength(
+            remoteStorageManager.cdnNumber(),
+            decodeMediaIdFromCdn(entry.key()),
+            entry.length()
         ))
-
-        // Update backupsDb with the change in usage
-        .collectList()
-        .<Void>flatMap(eithers -> {
-          // count up usage changes
-          long totalBytesDeleted = 0;
-          long totalCountDeleted = 0;
-          final List<Throwable> toThrow = new ArrayList<>();
-          for (Either either : eithers) {
-            switch (either) {
-              case DeleteFailure f:
-                toThrow.add(f.e());
-                break;
-              case DeleteSuccess s when s.usage() > 0:
-                totalBytesDeleted += s.usage();
-                totalCountDeleted++;
-                break;
-              default:
-                break;
-            }
-          }
-          final Mono<Void> result = toThrow.isEmpty()
-              ? Mono.empty()
-              : Mono.error(toThrow.stream().reduce((t1, t2) -> {
-                t1.addSuppressed(t2);
-                return t1;
-              }).get());
-          return Mono
-              .fromCompletionStage(this.backupsDb.trackMedia(backupUser, -totalCountDeleted, -totalBytesDeleted))
-              .then(result);
-        })
-        .toFuture();
+        .toList(),
+        result.cursor());
   }
+
+  public void deleteEntireBackup(final AuthenticatedBackupUser backupUser) throws BackupPermissionException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+
+    final int deletionConcurrency = backupConfiguration.deletionConcurrency();
+
+    // Clients only include SVRB data with their messages backup-id
+    if (backupUser.credentialType() == BackupCredentialType.MESSAGES) {
+      secureValueRecoveryBClient.removeData(svrbIdentifier(backupUser)).join();
+    }
+    try {
+      // Try to swap out the backupDir for the user
+      backupsDb.scheduleBackupDeletion(backupUser).join();
+    } catch (Exception e) {
+      final Throwable unwrapped = ExceptionUtils.unwrap(e);
+      if (unwrapped instanceof BackupsDb.PendingDeletionException) {
+        // If there was already a pending swap, try to delete the cdn objects directly
+        SYNCHRONOUS_DELETE_TIMER.record(() -> deletePrefix(backupUser.backupDir(), deletionConcurrency).join());
+      } else {
+        throw e;
+      }
+    }
+  }
+
+
+  public Flux<StorageDescriptor> deleteMedia(final AuthenticatedBackupUser backupUser,
+      final List<StorageDescriptor> storageDescriptors)
+      throws BackupPermissionException, BackupWrongCredentialTypeException {
+    checkBackupLevel(backupUser, BackupLevel.FREE);
+    checkBackupCredentialType(backupUser, BackupCredentialType.MEDIA);
+
+    // Check for a cdn we don't know how to process
+    if (storageDescriptors.stream().anyMatch(sd -> sd.cdn() != remoteStorageManager.cdnNumber())) {
+      return Flux.error(new BackupInvalidArgumentException("unsupported media cdn provided"));
+    }
+
+    return Flux.usingWhen(
+
+        // Gather usage updates into the UsageBatcher so we don't have to update our backup record on every delete
+        Mono.just(new UsageBatcher(backupConfiguration.usageCheckpointCount())),
+
+        // Deletes the objects, returning their former location. Tracks bytes removed so the quota can be updated on
+        // completion
+        batcher -> Flux.fromIterable(storageDescriptors)
+
+            // Delete the objects, allowing DELETION_CONCURRENCY operations out at a time
+            .flatMapSequential(
+                sd -> Mono.fromCompletionStage(remoteStorageManager.delete(cdnMediaPath(backupUser, sd.key()))),
+                backupConfiguration.deletionConcurrency())
+            .zipWithIterable(storageDescriptors)
+
+            // Track how much the remote storage manager indicated was deleted as part of the operation
+            .concatMap(deletedBytesAndStorageDescriptor -> {
+              final long deletedBytes = deletedBytesAndStorageDescriptor.getT1();
+              final StorageDescriptor sd = deletedBytesAndStorageDescriptor.getT2();
+
+              // If it has been a while, perform a checkpoint to make sure our usage doesn't drift too much
+              if (batcher.update(-deletedBytes)) {
+                final UsageBatcher.UsageUpdate usageUpdate = batcher.getAndReset();
+                return Mono
+                    .fromFuture(backupsDb.trackMedia(backupUser, usageUpdate.countDelta, usageUpdate.bytesDelta))
+                    .doOnError(throwable ->
+                        log.warn("Failed to update delta {} after successful delete operation", usageUpdate, throwable))
+                    .thenReturn(sd);
+              } else {
+                return Mono.just(sd);
+              }
+            }),
+
+        // On cleanup, update the quota using whatever remaining updates were accumulated in the batcher
+        batcher -> {
+          final UsageBatcher.UsageUpdate update = batcher.getAndReset();
+          return Mono
+              .fromFuture(backupsDb.trackMedia(backupUser, update.countDelta, update.bytesDelta))
+              .doOnError(throwable ->
+                  log.warn("Failed to update delta {} after successful delete operation", update, throwable));
+        });
+  }
+
+  /**
+   * Track pending media usage updates. Not thread safe!
+   */
+  private static class UsageBatcher {
+
+    private final int usageCheckpointCount;
+    private long runningCountDelta = 0;
+    private long runningBytesDelta = 0;
+
+    UsageBatcher(int usageCheckpointCount) {
+      this.usageCheckpointCount = usageCheckpointCount;
+    }
+
+    record UsageUpdate(long countDelta, long bytesDelta) {}
+
+    /**
+     * Stage a usage update. Returns true when it is time to make a checkpoint
+     *
+     * @param bytesDelta The amount of bytes that should be tracked as used (or if negative, freed). If the delta is
+     *                   non-zero, the count will also be updated.
+     * @return true if we should persist the usage
+     */
+    boolean update(long bytesDelta) {
+      this.runningCountDelta += Long.signum(bytesDelta);
+      this.runningBytesDelta += bytesDelta;
+      return Math.abs(runningCountDelta) >= usageCheckpointCount;
+    }
+
+    /**
+     * Get the current usage delta, and set the delta to 0
+     * @return A {@link UsageUpdate} to apply
+     */
+    UsageUpdate getAndReset() {
+      final UsageUpdate update = new UsageUpdate(runningCountDelta, runningBytesDelta);
+      runningCountDelta = 0;
+      runningBytesDelta = 0;
+      return update;
+    }
+  }
+
+  private static final ECPublicKey INVALID_PUBLIC_KEY = ECKeyPair.generate().getPublicKey();
 
   /**
    * Authenticate the ZK anonymous backup credential's presentation
@@ -430,65 +617,131 @@ public class BackupManager {
    * @param presentation A {@link BackupAuthCredentialPresentation}
    * @param signature    An XEd25519 signature of the presentation bytes
    * @return On authentication success, the authenticated backup-id and backup-tier encoded in the presentation
+   * @throws BackupFailedZkAuthenticationException If the provided presentation or signature were invalid
    */
-  public CompletableFuture<AuthenticatedBackupUser> authenticateBackupUser(
-      final BackupAuthCredentialPresentation presentation,
-      final byte[] signature) {
-    return backupsDb
-        .retrievePublicKey(presentation.getBackupId())
-        .thenApply(optionalPublicKey -> {
-          final byte[] publicKeyBytes = optionalPublicKey
-              .orElseThrow(() -> {
-                Metrics.counter(ZK_AUTHN_COUNTER_NAME,
-                        SUCCESS_TAG_NAME, String.valueOf(false),
-                        FAILURE_REASON_TAG_NAME, "missing_public_key")
-                    .increment();
-                return Status.NOT_FOUND.withDescription("Backup not found").asRuntimeException();
-              });
-          try {
-            final ECPublicKey publicKey = new ECPublicKey(publicKeyBytes);
-            return new AuthenticatedBackupUser(
-                presentation.getBackupId(),
-                verifySignatureAndCheckPresentation(presentation, signature, publicKey));
-          } catch (InvalidKeyException e) {
-            Metrics.counter(ZK_AUTHN_COUNTER_NAME,
-                    SUCCESS_TAG_NAME, String.valueOf(false),
-                    FAILURE_REASON_TAG_NAME, "invalid_public_key")
-                .increment();
-            logger.error("Invalid publicKey for backupId hash {}",
-                HexFormat.of().formatHex(BackupsDb.hashedBackupId(presentation.getBackupId())), e);
-            throw Status.INTERNAL
-                .withCause(e)
-                .withDescription("Could not deserialize stored public key")
-                .asRuntimeException();
-          }
-        })
-        .thenApply(result -> {
-          Metrics.counter(ZK_AUTHN_COUNTER_NAME, SUCCESS_TAG_NAME, String.valueOf(true)).increment();
-          return result;
-        });
-  }
-
-
-  /**
-   * Verify the presentation and return the extracted backup tier
-   *
-   * @param presentation A ZK credential presentation that encodes the backupId and the receipt level of the requester
-   * @return The backup tier this presentation supports
-   */
-  private BackupTier verifySignatureAndCheckPresentation(
+  public AuthenticatedBackupUser authenticateBackupUser(
       final BackupAuthCredentialPresentation presentation,
       final byte[] signature,
-      final ECPublicKey publicKey) {
-    if (!publicKey.verifySignature(presentation.serialize(), signature)) {
-      Metrics.counter(ZK_AUTHN_COUNTER_NAME,
-              SUCCESS_TAG_NAME, String.valueOf(false),
-              FAILURE_REASON_TAG_NAME, "signature_validation")
-          .increment();
-      throw Status.UNAUTHENTICATED
-          .withDescription("backup auth credential presentation signature verification failed")
-          .asRuntimeException();
+      final String userAgentString) throws BackupFailedZkAuthenticationException {
+
+    final PresentationSignatureVerifier signatureVerifier = verifyPresentation(presentation);
+
+    final Optional<BackupsDb.AuthenticationData> optionalAuthenticationData =
+        backupsDb.retrieveAuthenticationData(presentation.getBackupId()).join();
+    final UserAgent userAgent = parseUserAgent(userAgentString);
+    final BackupsDb.AuthenticationData authenticationData = optionalAuthenticationData
+        .orElseGet(() -> {
+          Metrics.counter(ZK_AUTHN_COUNTER_NAME, Tags.of(
+                  Tag.of(SUCCESS_TAG_NAME, String.valueOf(false)),
+                  Tag.of(FAILURE_REASON_TAG_NAME, "missing_public_key"),
+                  UserAgentTagUtil.getPlatformTag(userAgent)))
+              .increment();
+          // There was no stored public key, use a bunk public key so that validation will fail
+          return new BackupsDb.AuthenticationData(INVALID_PUBLIC_KEY, null, null);
+        });
+
+    final Pair<BackupCredentialType, BackupLevel> credentialTypeAndBackupLevel =
+        signatureVerifier.verifySignature(signature, authenticationData.publicKey());
+
+    Metrics.counter(ZK_AUTHN_COUNTER_NAME, SUCCESS_TAG_NAME, String.valueOf(true)).increment();
+    return new AuthenticatedBackupUser(
+        presentation.getBackupId(),
+        credentialTypeAndBackupLevel.first(),
+        credentialTypeAndBackupLevel.second(),
+        authenticationData.backupDir(),
+        authenticationData.mediaDir(),
+        userAgent);
+  }
+
+  /**
+   * List all backups stored in the backups table
+   *
+   * @param segments  Number of segments to read in parallel from the underlying backup database
+   * @return Flux of {@link StoredBackupAttributes} for each backup record in the backups table
+   */
+  public Flux<StoredBackupAttributes> listBackupAttributes(final int segments) {
+    return this.backupsDb.listBackupAttributes(segments);
+  }
+
+  /**
+   * List all backups whose media or messages refresh timestamp are older than the provided purgeTime
+   *
+   * @param segments  Number of segments to read in parallel from the underlying backup database
+   * @param scheduler Scheduler for running downstream operations
+   * @param purgeTime If a backup's last message refresh time is strictly before purgeTime, it will be marked as
+   *                  requiring full deletion. If only the last refresh time is strictly before purgeTime, it will be
+   *                  marked as requiring message deletion. Otherwise, it will not be included in the results.
+   * @return Flux of backups that require some deletion action
+   */
+  public Flux<ExpiredBackup> getExpiredBackups(final int segments, final Scheduler scheduler, final Instant purgeTime) {
+    return this.backupsDb.getExpiredBackups(segments, scheduler, purgeTime);
+  }
+
+  /**
+   * Delete some or all of the objects associated with the backup, and update the backup database.
+   *
+   * @param expiredBackup The backup to expire. If the {@link ExpiredBackup} is a media expiration, only the media
+   *                      objects will be deleted, otherwise all backup objects will be deleted
+   * @return A stage that completes when the deletion operation is finished
+   */
+  public CompletableFuture<Void> expireBackup(final ExpiredBackup expiredBackup) {
+    // Clients only include SVRB data with their messages backup-id
+    final CompletableFuture<Void> svrbRemoval = switch(expiredBackup.expirationType()) {
+      case ALL -> secureValueRecoveryBClient.removeData(svrbIdentifier(expiredBackup.hashedBackupId()));
+      case MEDIA, GARBAGE_COLLECTION ->  CompletableFuture.completedFuture(null);
+    };
+    return svrbRemoval.thenCompose(_ -> backupsDb.startExpiration(expiredBackup)
+        // the deletion operation is effectively single threaded -- it's expected that the caller can increase
+        // concurrency by deleting more backups at once, rather than increasing concurrency deleting an individual
+        // backup
+        .thenCompose(ignored -> deletePrefix(expiredBackup.prefixToDelete(), 1))
+        .thenCompose(ignored -> backupsDb.finishExpiration(expiredBackup)));
+  }
+
+  /**
+   * List and delete all files associated with a prefix
+   *
+   * @param prefixToDelete The prefix to expire.
+   */
+  private CompletableFuture<Void> deletePrefix(final String prefixToDelete, int concurrentDeletes) {
+    if (prefixToDelete.length() != BackupsDb.BACKUP_DIRECTORY_PATH_LENGTH
+        && prefixToDelete.length() != BackupsDb.MEDIA_DIRECTORY_PATH_LENGTH) {
+      throw new IllegalArgumentException("Unexpected prefix deletion for " + prefixToDelete);
     }
+    final String prefix = prefixToDelete + "/";
+    return Mono
+        .fromCompletionStage(this.remoteStorageManager.list(prefix, Optional.empty(), 1000))
+        .expand(listResult -> {
+          if (listResult.cursor().isEmpty()) {
+            return Mono.empty();
+          }
+          return Mono.fromCompletionStage(() -> this.remoteStorageManager.list(prefix, listResult.cursor(), 1000));
+        })
+        .flatMap(listResult -> Flux.fromIterable(listResult.objects()))
+        .flatMap(
+            result -> Mono.fromCompletionStage(() -> remoteStorageManager.delete(prefix + result.key())),
+            concurrentDeletes)
+        .count()
+        .doOnSuccess(itemsRemoved -> DistributionSummary.builder(DELETE_COUNT_DISTRIBUTION_NAME)
+            .register(Metrics.globalRegistry)
+            .record(itemsRemoved))
+        .then()
+        .toFuture();
+  }
+
+  interface PresentationSignatureVerifier {
+
+    Pair<BackupCredentialType, BackupLevel> verifySignature(byte[] signature, ECPublicKey publicKey) throws BackupFailedZkAuthenticationException;
+  }
+
+  /**
+   * Verify the presentation was issued by us, which should be done before checking the stored public key
+   *
+   * @param presentation A ZK credential presentation that encodes the backupId and the receipt level of the requester
+   * @return A function that can be used to verify a signature provided with the presentation
+   */
+  private PresentationSignatureVerifier verifyPresentation(final BackupAuthCredentialPresentation presentation)
+      throws BackupFailedZkAuthenticationException {
     try {
       presentation.verify(clock.instant(), serverSecretParams);
     } catch (VerificationFailedException e) {
@@ -496,47 +749,93 @@ public class BackupManager {
               SUCCESS_TAG_NAME, String.valueOf(false),
               FAILURE_REASON_TAG_NAME, "presentation_verification")
           .increment();
-      throw Status.UNAUTHENTICATED
-          .withDescription("backup auth credential presentation verification failed")
-          .withCause(e)
-          .asRuntimeException();
+      throw new BackupFailedZkAuthenticationException("backup auth credential presentation verification failed");
     }
+    return (signature, publicKey) -> {
+      if (!publicKey.verifySignature(presentation.serialize(), signature)) {
+        Metrics.counter(ZK_AUTHN_COUNTER_NAME,
+                SUCCESS_TAG_NAME, String.valueOf(false),
+                FAILURE_REASON_TAG_NAME, "signature_validation")
+            .increment();
+        throw new BackupFailedZkAuthenticationException("backup auth credential presentation signature verification failed");
+      }
+      return new Pair<>(presentation.getType(), presentation.getBackupLevel());
+    };
+  }
 
-    return BackupTier
-        .fromReceiptLevel(presentation.getReceiptLevel())
-        .orElseThrow(() -> {
-          Metrics.counter(ZK_AUTHN_COUNTER_NAME,
-                  SUCCESS_TAG_NAME, String.valueOf(false),
-                  FAILURE_REASON_TAG_NAME, "invalid_receipt_level")
-              .increment();
-          return Status.PERMISSION_DENIED.withDescription("invalid receipt level").asRuntimeException();
-        });
+  /**
+   * Check that the authenticated backup user is authorized to use the provided backupLevel
+   *
+   * @param backupUser  The backup user to check
+   * @param backupLevel The authorization level to verify the backupUser has access to
+   * @throws BackupPermissionException if the backupUser is not authorized to access {@code backupLevel}
+   */
+  @VisibleForTesting
+  static void checkBackupLevel(final AuthenticatedBackupUser backupUser, final BackupLevel backupLevel)
+      throws BackupPermissionException {
+    if (backupUser.backupLevel().compareTo(backupLevel) < 0) {
+      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME, Tags.of(
+              UserAgentTagUtil.getPlatformTag(backupUser.userAgent()),
+              Tag.of(FAILURE_REASON_TAG_NAME, "level")))
+          .increment();
+
+      throw new BackupPermissionException("credential does not support the requested operation");
+    }
+  }
+
+  /**
+   * Check that the authenticated backup user is authenticated with the given credential type
+   *
+   * @param backupUser     The backup user to check
+   * @param credentialType The credential type to require
+   * @throws BackupWrongCredentialTypeException error if the backup user is not authenticated with the given
+   * {@code credentialType}
+   */
+  @VisibleForTesting
+  static void checkBackupCredentialType(final AuthenticatedBackupUser backupUser, final BackupCredentialType credentialType) throws BackupWrongCredentialTypeException {
+    if (backupUser.credentialType() != credentialType) {
+      Metrics.counter(ZK_AUTHZ_FAILURE_COUNTER_NAME,
+              FAILURE_REASON_TAG_NAME, "credential_type")
+          .increment();
+
+      throw new BackupWrongCredentialTypeException("wrong credential type for the requested operation");
+    }
   }
 
   @VisibleForTesting
-  static String encodeBackupIdForCdn(final AuthenticatedBackupUser backupUser) {
-    return encodeForCdn(BackupsDb.hashedBackupId(backupUser.backupId()));
-  }
-
-  @VisibleForTesting
-  static String encodeForCdn(final byte[] bytes) {
+  static String encodeMediaIdForCdn(final byte[] bytes) {
     return Base64.getUrlEncoder().encodeToString(bytes);
   }
 
-  private static byte[] decodeFromCdn(final String base64) {
+  private static byte[] decodeMediaIdFromCdn(final String base64) {
     return Base64.getUrlDecoder().decode(base64);
   }
 
   private static String cdnMessageBackupName(final AuthenticatedBackupUser backupUser) {
-    return "%s/%s".formatted(encodeBackupIdForCdn(backupUser), MESSAGE_BACKUP_NAME);
+    return "%s/%s".formatted(backupUser.backupDir(), MESSAGE_BACKUP_NAME);
+  }
+
+  private static String cdnMediaDirectory(final String backupDir, final String mediaDir) {
+    return "%s/%s/".formatted(backupDir, mediaDir);
   }
 
   private static String cdnMediaDirectory(final AuthenticatedBackupUser backupUser) {
-    return "%s/%s/".formatted(encodeBackupIdForCdn(backupUser), MEDIA_DIRECTORY_NAME);
+    return cdnMediaDirectory(backupUser.backupDir(), backupUser.mediaDir());
   }
 
   private static String cdnMediaPath(final AuthenticatedBackupUser backupUser, final byte[] mediaId) {
-    return "%s%s".formatted(cdnMediaDirectory(backupUser), encodeForCdn(mediaId));
+    return "%s%s".formatted(cdnMediaDirectory(backupUser), encodeMediaIdForCdn(mediaId));
   }
 
+  static String rateLimitKey(final AuthenticatedBackupUser backupUser) {
+    return Base64.getEncoder().encodeToString(BackupsDb.hashedBackupId(backupUser.backupId()));
+  }
+
+  private static @Nullable UserAgent parseUserAgent(final String userAgentString) {
+    try {
+      return UserAgentUtil.parseUserAgentString(userAgentString);
+    } catch (UnrecognizedUserAgentException e) {
+      return null;
+    }
+  }
 }

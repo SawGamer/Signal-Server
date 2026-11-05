@@ -14,14 +14,12 @@ import java.util.concurrent.CompletableFuture;
 import org.whispersystems.textsecuregcm.entities.SignedPreKey;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.util.AttributeValues;
-import reactor.core.publisher.Flux;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.Delete;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.Put;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 
 /**
@@ -109,25 +107,14 @@ public abstract class RepeatedUseSignedPreKeyStore<K extends SignedPreKey<?>> {
             .build())
         .thenApply(response -> response.hasItem() ? Optional.of(getPreKeyFromItem(response.item())) : Optional.empty());
 
-    findFuture.whenComplete((maybeSignedPreKey, throwable) ->
-        sample.stop(Metrics.timer(findKeyTimerName,
-            "keyPresent", String.valueOf(maybeSignedPreKey != null && maybeSignedPreKey.isPresent()))));
+    return findFuture.whenComplete((maybeSignedPreKey, throwable) -> {
+      if (throwable == null && maybeSignedPreKey.map(k -> !KeyIdUtil.keyIdValid(k.keyId())).orElse(false)) {
+        throw new IllegalStateException("Encountered an impossible invalid repeated use pre-key id of " + maybeSignedPreKey.get().keyId());
+      }
 
-    return findFuture;
-  }
-
-  public Flux<Byte> getDeviceIdsWithKeys(final UUID identifier) {
-    return Flux.from(dynamoDbAsyncClient.queryPaginator(QueryRequest.builder()
-            .tableName(tableName)
-            .keyConditionExpression("#uuid = :uuid")
-            .expressionAttributeNames(Map.of("#uuid", KEY_ACCOUNT_UUID))
-            .expressionAttributeValues(Map.of(
-                ":uuid", getPartitionKey(identifier)))
-            .projectionExpression(KEY_DEVICE_ID)
-            .consistentRead(true)
-            .build())
-        .items())
-        .map(item -> Byte.parseByte(item.get(KEY_DEVICE_ID).n()));
+      sample.stop(Metrics.timer(findKeyTimerName,
+          "keyPresent", String.valueOf(maybeSignedPreKey != null && maybeSignedPreKey.isPresent())));
+    });
   }
 
   protected static Map<String, AttributeValue> getPrimaryKey(final UUID identifier, final byte deviceId) {

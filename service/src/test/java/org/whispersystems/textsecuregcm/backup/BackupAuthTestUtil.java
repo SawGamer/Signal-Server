@@ -5,6 +5,7 @@
 
 package org.whispersystems.textsecuregcm.backup;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -12,14 +13,19 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import org.junit.jupiter.api.Assertions;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialPresentation;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialRequest;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialRequestContext;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
+import org.signal.libsignal.zkgroup.backups.BackupLevel;
+import org.whispersystems.textsecuregcm.auth.RedemptionRange;
+import org.whispersystems.textsecuregcm.experiment.ExperimentEnrollmentManager;
 import org.whispersystems.textsecuregcm.storage.Account;
-import org.whispersystems.textsecuregcm.tests.util.ExperimentHelper;
 
 public class BackupAuthTestUtil {
 
@@ -35,33 +41,47 @@ public class BackupAuthTestUtil {
   }
 
   public BackupAuthCredentialPresentation getPresentation(
-      final BackupTier backupTier, final byte[] backupKey, final UUID aci)
+      final BackupLevel backupLevel, final byte[] backupKey, final UUID aci)
       throws VerificationFailedException {
+    return getPresentation(params, backupLevel, backupKey, aci);
+  }
+
+  public BackupAuthCredentialPresentation getPresentation(
+      GenericServerSecretParams params, final BackupLevel backupLevel, final byte[] backupKey, final UUID aci)
+      throws VerificationFailedException {
+    final Instant redemptionTime = clock.instant().truncatedTo(ChronoUnit.DAYS);
     final BackupAuthCredentialRequestContext ctx = BackupAuthCredentialRequestContext.create(backupKey, aci);
     return ctx.receiveResponse(
-            ctx.getRequest().issueCredential(clock.instant().truncatedTo(ChronoUnit.DAYS), backupTier.getReceiptLevel(), params),
-            params.getPublicParams(),
-            backupTier.getReceiptLevel())
+            ctx.getRequest()
+                .issueCredential(clock.instant().truncatedTo(ChronoUnit.DAYS), backupLevel, BackupCredentialType.MESSAGES, params),
+            redemptionTime,
+            params.getPublicParams())
         .present(params.getPublicParams());
   }
 
   public List<BackupAuthManager.Credential> getCredentials(
-      final BackupTier backupTier,
+      final BackupLevel backupLevel,
       final BackupAuthCredentialRequest request,
+      final BackupCredentialType credentialType,
       final Instant redemptionStart,
       final Instant redemptionEnd) {
     final UUID aci = UUID.randomUUID();
 
-    final String experimentName = switch (backupTier) {
-      case NONE -> "notUsed";
-      case MESSAGES -> BackupAuthManager.BACKUP_EXPERIMENT_NAME;
-      case MEDIA -> BackupAuthManager.BACKUP_MEDIA_EXPERIMENT_NAME;
-    };
     final BackupAuthManager issuer = new BackupAuthManager(
-        ExperimentHelper.withEnrollment(experimentName, aci), null, null, params, clock);
+        mock(ExperimentEnrollmentManager.class), null, null, null, null, params, clock);
     Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(aci);
-    when(account.getBackupCredentialRequest()).thenReturn(request.serialize());
-    return issuer.getBackupAuthCredentials(account, redemptionStart, redemptionEnd).join();
+    when(account.getAccountIdentifier()).thenReturn(aci);
+    when(account.getBackupCredentialRequest(any())).thenReturn(Optional.of(request.serialize()));
+    when(account.getBackupVoucher()).thenReturn(switch (backupLevel) {
+      case FREE -> null;
+      case PAID -> new Account.BackupVoucher(201L, redemptionEnd.plus(1, ChronoUnit.SECONDS));
+    });
+    final RedemptionRange redemptionRange;
+    redemptionRange = RedemptionRange.inclusive(clock, redemptionStart, redemptionEnd);
+    try {
+      return issuer.getBackupAuthCredentials(account, redemptionRange).get(credentialType);
+    } catch (BackupNotFoundException e) {
+      return Assertions.fail("Backup credential request not found even though we set one");
+    }
   }
 }

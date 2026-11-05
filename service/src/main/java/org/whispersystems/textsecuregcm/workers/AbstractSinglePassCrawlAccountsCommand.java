@@ -15,13 +15,12 @@ import net.sourceforge.argparse4j.inf.Subparser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.WhisperServerConfiguration;
-import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.util.logging.UncaughtExceptionHandler;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
-public abstract class AbstractSinglePassCrawlAccountsCommand extends EnvironmentCommand<WhisperServerConfiguration> {
+public abstract class AbstractSinglePassCrawlAccountsCommand extends AbstractCommandWithDependencies {
 
   private CommandDependencies commandDependencies;
   private Namespace namespace;
@@ -60,47 +59,17 @@ public abstract class AbstractSinglePassCrawlAccountsCommand extends Environment
 
   @Override
   protected void run(final Environment environment, final Namespace namespace,
-      final WhisperServerConfiguration configuration) throws Exception {
-
-    UncaughtExceptionHandler.register();
-    MetricsUtil.configureRegistries(configuration, environment);
-
+      final WhisperServerConfiguration configuration, final CommandDependencies commandDependencies) throws Exception {
     this.namespace = namespace;
-    this.commandDependencies = CommandDependencies.build(getName(), environment, configuration);
+    this.commandDependencies = commandDependencies;
 
     final int segments = Objects.requireNonNull(namespace.getInt(SEGMENT_COUNT));
-
-    environment.lifecycle().manage(new CommandStopListener(configuration.getCommandStopListener()));
 
     logger.info("Crawling accounts with {} segments and {} processors",
         segments,
         Runtime.getRuntime().availableProcessors());
 
-    try {
-      environment.lifecycle().getManagedObjects().forEach(managedObject -> {
-        try {
-          managedObject.start();
-        } catch (final Exception e) {
-          logger.error("Failed to start managed object", e);
-          throw new RuntimeException(e);
-        }
-      });
-
-      crawlAccounts(commandDependencies.accountsManager().streamAllFromDynamo(segments, Schedulers.parallel()));
-    } finally {
-      environment.lifecycle().getManagedObjects().forEach(managedObject -> {
-        try {
-          managedObject.stop();
-        } catch (final Exception e) {
-          logger.error("Failed to stop managed object", e);
-        }
-      });
-    }
-  }
-
-  @Override
-  public void onError(final Cli cli, final Namespace namespace, final Throwable throwable) {
-    logger.error("Unhandled error", throwable);
+    crawlAccounts(commandDependencies.accountsManager().streamAllFromDynamo(segments, Schedulers.parallel()));
   }
 
   protected abstract void crawlAccounts(final Flux<Account> accounts);

@@ -8,6 +8,7 @@ package org.whispersystems.textsecuregcm.s3;
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -17,14 +18,17 @@ import java.util.function.Consumer;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.WhisperServerService;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
+import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import javax.annotation.Nullable;
 
 /**
  * An S3 object monitor watches a specific object in an S3 bucket and notifies a listener if that object changes.
@@ -39,8 +43,6 @@ public class S3ObjectMonitor {
   private final Duration refreshInterval;
   private ScheduledFuture<?> refreshFuture;
 
-  private final Consumer<InputStream> changeListener;
-
   private final AtomicReference<String> lastETag = new AtomicReference<>();
 
   private final S3Client s3Client;
@@ -48,24 +50,46 @@ public class S3ObjectMonitor {
   private static final Logger log = LoggerFactory.getLogger(S3ObjectMonitor.class);
 
   public S3ObjectMonitor(
+      final AwsCredentialsProvider awsCredentialsProvider,
       final String s3Region,
       final String s3Bucket,
       final String objectKey,
       final long maxObjectSize,
       final ScheduledExecutorService refreshExecutorService,
-      final Duration refreshInterval,
-      final Consumer<InputStream> changeListener) {
+      final Duration refreshInterval) {
 
     this(S3Client.builder()
             .region(Region.of(s3Region))
-            .credentialsProvider(WhisperServerService.AWSSDK_CREDENTIALS_PROVIDER)
+            .credentialsProvider(awsCredentialsProvider)
             .build(),
         s3Bucket,
         objectKey,
         maxObjectSize,
         refreshExecutorService,
-        refreshInterval,
-        changeListener);
+        refreshInterval);
+  }
+
+  // construction with s3Endpoint
+  public S3ObjectMonitor(final AwsCredentialsProvider awsCredentialsProvider,
+      final URI s3Endpoint,
+      final String s3Region,
+      final String s3Bucket,
+      final String objectKey,
+      final long maxObjectSize,
+      final ScheduledExecutorService refreshExecutorService,
+      final Duration refreshInterval) {
+    this(S3Client.builder()
+            .region(Region.of(s3Region))
+            .credentialsProvider(awsCredentialsProvider)
+            .endpointOverride(s3Endpoint)
+            .serviceConfiguration(S3Configuration.builder()
+                .pathStyleAccessEnabled(true).build())
+            .build(),
+        s3Bucket,
+        objectKey,
+        maxObjectSize,
+        refreshExecutorService,
+        refreshInterval);
   }
 
   @VisibleForTesting
@@ -75,8 +99,7 @@ public class S3ObjectMonitor {
       final String objectKey,
       final long maxObjectSize,
       final ScheduledExecutorService refreshExecutorService,
-      final Duration refreshInterval,
-      final Consumer<InputStream> changeListener) {
+      final Duration refreshInterval) {
 
     this.s3Client = s3Client;
     this.s3Bucket = s3Bucket;
@@ -85,21 +108,19 @@ public class S3ObjectMonitor {
 
     this.refreshExecutorService = refreshExecutorService;
     this.refreshInterval = refreshInterval;
-
-    this.changeListener = changeListener;
   }
 
-  public synchronized void start() {
+  public synchronized void start(final Consumer<InputStream> changeListener) {
     if (refreshFuture != null) {
       throw new RuntimeException("S3 object manager already started");
     }
 
     // Run the first request immediately/blocking, then start subsequent calls.
     log.info("Initial request for s3://{}/{}", s3Bucket, objectKey);
-    refresh();
+    refresh(changeListener);
 
     refreshFuture = refreshExecutorService
-        .scheduleAtFixedRate(this::refresh, refreshInterval.toMillis(), refreshInterval.toMillis(),
+        .scheduleAtFixedRate(() -> refresh(changeListener), refreshInterval.toMillis(), refreshInterval.toMillis(),
             TimeUnit.MILLISECONDS);
   }
 
@@ -139,7 +160,7 @@ public class S3ObjectMonitor {
    * changed since the last call to {@link #getObject()} or {@code refresh()}.
    */
   @VisibleForTesting
-  void refresh() {
+  void refresh(final Consumer<InputStream> changeListener) {
     try {
       final HeadObjectResponse objectMetadata = s3Client.headObject(HeadObjectRequest.builder()
           .bucket(s3Bucket)

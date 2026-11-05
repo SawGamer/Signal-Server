@@ -15,16 +15,17 @@ import static org.mockito.Mockito.when;
 import com.google.common.net.HttpHeaders;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.core.Response;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.util.MockUtils;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
+import org.whispersystems.textsecuregcm.util.TestRemoteAddressFilterProvider;
 
 @ExtendWith(DropwizardExtensionsSupport.class)
 public class RateLimitedByIpTest {
@@ -60,18 +61,19 @@ public class RateLimitedByIpTest {
       .setMapper(SystemMapper.jsonMapper())
       .setTestContainerFactory(new GrizzlyWebTestContainerFactory())
       .addResource(new Controller())
-      .addProvider(new RateLimitByIpFilter(RATE_LIMITERS, true))
+      .addProvider(new RateLimitByIpFilter(RATE_LIMITERS))
+      .addProvider(new TestRemoteAddressFilterProvider(IP))
       .build();
 
   @Test
   public void testRateLimits() throws Exception {
     doNothing().when(RATE_LIMITER).validate(eq(IP));
     validateSuccess("/test/strict");
-    doThrow(new RateLimitExceededException(RETRY_AFTER, true)).when(RATE_LIMITER).validate(eq(IP));
+    doThrow(new RateLimitExceededException(RETRY_AFTER)).when(RATE_LIMITER).validate(eq(IP));
     validateFailure("/test/strict", RETRY_AFTER);
     doNothing().when(RATE_LIMITER).validate(eq(IP));
     validateSuccess("/test/strict");
-    doThrow(new RateLimitExceededException(RETRY_AFTER, true)).when(RATE_LIMITER).validate(eq(IP));
+    doThrow(new RateLimitExceededException(RETRY_AFTER)).when(RATE_LIMITER).validate(eq(IP));
     validateFailure("/test/strict", RETRY_AFTER);
   }
 
@@ -90,7 +92,7 @@ public class RateLimitedByIpTest {
         .request()
         .get();
 
-    assertEquals(413, response.getStatus());
+    assertEquals(429, response.getStatus());
     assertEquals("" + expectedRetryAfter.getSeconds(), response.getHeaderString(HttpHeaders.RETRY_AFTER));
   }
 }

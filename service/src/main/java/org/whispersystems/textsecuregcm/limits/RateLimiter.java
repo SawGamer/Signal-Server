@@ -12,13 +12,13 @@ import reactor.core.publisher.Mono;
 
 public interface RateLimiter {
 
-  void validate(String key, int amount) throws RateLimitExceededException;
+  void validate(String key, long amount) throws RateLimitExceededException;
 
-  CompletionStage<Void> validateAsync(String key, int amount);
+  CompletionStage<Void> validateAsync(String key, long amount);
 
-  boolean hasAvailablePermits(String key, int permits);
+  boolean hasAvailablePermits(String key, long permits);
 
-  CompletionStage<Boolean> hasAvailablePermitsAsync(String key, int amount);
+  CompletionStage<Boolean> hasAvailablePermitsAsync(String key, long amount);
 
   void clear(String key);
 
@@ -34,7 +34,7 @@ public interface RateLimiter {
     validate(accountUuid.toString());
   }
 
-  default void validate(final UUID accountUuid, final int permits) throws RateLimitExceededException {
+  default void validate(final UUID accountUuid, final long permits) throws RateLimitExceededException {
     validate(accountUuid.toString(), permits);
   }
 
@@ -62,11 +62,11 @@ public interface RateLimiter {
     return validateReactive(accountUuid.toString());
   }
 
-  default boolean hasAvailablePermits(final UUID accountUuid, final int permits) {
+  default boolean hasAvailablePermits(final UUID accountUuid, final long permits) {
     return hasAvailablePermits(accountUuid.toString(), permits);
   }
 
-  default CompletionStage<Boolean> hasAvailablePermitsAsync(final UUID accountUuid, final int permits) {
+  default CompletionStage<Boolean> hasAvailablePermitsAsync(final UUID accountUuid, final long permits) {
     return hasAvailablePermitsAsync(accountUuid.toString(), permits);
   }
 
@@ -78,21 +78,26 @@ public interface RateLimiter {
     return clearAsync(accountUuid.toString());
   }
 
-  /**
-   * If the wrapped {@code validate()} call throws a {@link RateLimitExceededException}, it will adapt it to ensure that
-   * {@link RateLimitExceededException#isLegacy()} returns {@code false}
-   */
-  static void adaptLegacyException(final RateLimitValidator validator) throws RateLimitExceededException {
+  /// Restore `permitsToRestore` permits to the pool. If the RateLimiter has a maximum bucket size, it is respected even
+  /// if `permitsToRestore` would exceed the maximum bucket size.
+  ///
+  /// @param key The key to restore permits for.
+  /// @param permitsToRestore The number of permits to restore
+  /// @implNote The default implementation of this method assumes permits can be restored by calling `validate` with a
+  /// negative permit count. If the `validate` implementation does not support this, the implementor must provide a
+  /// custom implementation of [this#restorePermits].
+  default void restorePermits(final String key, int permitsToRestore) {
+    if (permitsToRestore < 0) {
+      throw new IllegalArgumentException("permits to restore must be non-negative");
+    }
     try {
-      validator.validate();
-    } catch (final RateLimitExceededException e) {
-      throw new RateLimitExceededException(e.getRetryDuration().orElse(null), false);
+      validate(key, -1 * permitsToRestore);
+    } catch (RateLimitExceededException e) {
+      throw new IllegalStateException("Out of permits when trying to restore permits", e);
     }
   }
 
-  @FunctionalInterface
-  interface RateLimitValidator {
-
-    void validate() throws RateLimitExceededException;
+  default void restorePermits(final UUID accountUuid, int permitsToRestore) {
+    restorePermits(accountUuid.toString(), permitsToRestore);
   }
 }

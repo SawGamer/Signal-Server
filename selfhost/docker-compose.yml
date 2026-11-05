@@ -1,0 +1,161 @@
+# Self-hosted Signal-Server stack. Usage: see README.md (./build.sh, ./setup.sh, docker compose up -d).
+#
+# Everything runs on one machine. Only Caddy (profile "public") is exposed to the internet; for local testing
+# the chat server is published on 127.0.0.1:8080 instead.
+
+name: messenger
+
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24   # fixed addresses: FoundationDB's cluster file and Redis cluster topology use IPs
+
+volumes:
+  redis-data:
+  dynamodb-data:
+  fdb-data:
+  s3-data:
+  caddy-data:
+
+services:
+
+  # --- storage ------------------------------------------------------------------------------------------------
+
+  redis:
+    image: redis:7.4
+    restart: unless-stopped
+    # Single-node Redis *cluster*: the server only speaks the cluster protocol. Keyspace notifications are needed
+    # for device linking.
+    command: >
+      redis-server --cluster-enabled yes --cluster-config-file /data/nodes.conf
+      --cluster-announce-ip 10.89.0.11 --appendonly yes --notify-keyspace-events K$$glz
+    networks:
+      backend:
+        ipv4_address: 10.89.0.11
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # first boot: assign all hash slots to this node, then wait for cluster_state:ok
+      test: ["CMD-SHELL", "redis-cli cluster info | grep -q cluster_state:ok || { redis-cli cluster addslotsrange 0 16383 >/dev/null 2>&1; exit 1; }"]
+      interval: 3s
+      retries: 30
+
+  dynamodb:
+    image: amazon/dynamodb-local:3.1.0
+    restart: unless-stopped
+    user: root   # so it can write to the named volume
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+    networks: [backend]
+    volumes:
+      - dynamodb-data:/data
+
+  foundationdb:
+    image: foundationdb/foundationdb:7.3.76   # must match the client library version in pom.xml
+    restart: unless-stopped
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: ${FDB_CLUSTER_FILE_CONTENTS}
+    networks:
+      backend:
+        ipv4_address: 10.89.0.10
+    volumes:
+      - fdb-data:/var/fdb/data
+    healthcheck:
+      # first boot: create a single-replica database, then wait until it's available
+      test: ["CMD-SHELL", "fdbcli --exec 'status minimal' --timeout 3 | grep -q 'is available' || { fdbcli --exec 'configure new single ssd' --timeout 10 >/dev/null 2>&1; exit 1; }"]
+      interval: 5s
+      retries: 30
+
+  s3:
+    image: chrislusf/seaweedfs:4.50
+    restart: unless-stopped
+    command: >
+      server -dir=/data -volume.max=0
+      -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -s3.domainName=s3
+    networks:
+      backend:
+        # The server's S3 client addresses buckets as <bucket>.s3 (virtual-host style)
+        aliases: [cdn.s3, prekeys.s3]
+    volumes:
+      - s3-data:/data
+      - ./secrets/s3.json:/etc/seaweedfs/s3.json:ro
+
+  # --- one-shot initialization (safe to re-run) ---------------------------------------------------------------
+
+  s3-init:
+    image: chrislusf/seaweedfs:4.50
+    depends_on: [s3]
+    networks: [backend]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until echo "s3.bucket.list" | weed shell -master=s3:9333 >/dev/null 2>&1; do sleep 2; done
+        for b in cdn prekeys; do
+          echo "s3.bucket.list" | weed shell -master=s3:9333 2>/dev/null | grep -qw "$$b" \
+            || echo "s3.bucket.create -name $$b" | weed shell -master=s3:9333
+        done
+        echo "buckets ready"
+
+  db-init:
+    image: selfhost/chat-server:latest
+    depends_on: [dynamodb]
+    networks: [backend]
+    command: ["create-tables"]
+    restart: on-failure:10   # DynamoDB Local may still be starting
+
+  # --- application ----------------------------------------------------------------------------------------
+
+  registration:
+    image: selfhost/registration-service:latest
+    restart: unless-stopped
+    networks: [backend]
+    environment:
+      TLS_CERT_CHAIN: /certs/registration-cert.pem
+      TLS_PRIVATE_KEY: /certs/registration-key.pem
+      SHARED_SECRET: ${REGISTRATION_SHARED_SECRET}
+      SENDER: ${SMS_SENDER:-log}
+      APP_NAME: ${APP_NAME}
+      DEFAULT_LANGUAGE: ${SMS_DEFAULT_LANGUAGE:-ar}   # used when the phone doesn't say (Arabic or English)
+      TEST_NUMBERS: ${TEST_NUMBERS:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_MESSAGING_SERVICE_SID: ${TWILIO_MESSAGING_SERVICE_SID:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+    volumes:
+      - ./secrets/registration:/certs:ro
+
+  chat-server:
+    image: selfhost/chat-server:latest
+    restart: unless-stopped
+    depends_on:
+      redis: {condition: service_healthy}
+      foundationdb: {condition: service_healthy}
+      db-init: {condition: service_completed_successfully}
+      s3-init: {condition: service_completed_successfully}
+      registration: {condition: service_started}
+    networks: [backend]
+    env_file: [.env]
+    volumes:
+      - ./config:/etc/signal:ro
+      - ./secrets/secrets.yml:/etc/signal-secrets/secrets.yml:ro
+    ports:
+      - "127.0.0.1:8080:8080"     # local testing; the public entry point is Caddy
+      - "127.0.0.1:8081:8081"     # admin: /healthcheck, metrics
+
+  # --- public HTTPS entry point (enable with: docker compose --profile public up -d) --------------------------
+
+  caddy:
+    image: caddy:2
+    profiles: [public]
+    restart: unless-stopped
+    depends_on: [chat-server]
+    environment:
+      DOMAIN: ${DOMAIN}
+    networks: [backend]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data

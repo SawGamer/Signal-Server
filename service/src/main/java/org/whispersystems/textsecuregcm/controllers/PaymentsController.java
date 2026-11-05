@@ -7,11 +7,11 @@ package org.whispersystems.textsecuregcm.controllers;
 
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.configuration.PaymentsServiceConfiguration;
@@ -42,14 +42,14 @@ public class PaymentsController {
   @GET
   @Path("/auth")
   @Produces(MediaType.APPLICATION_JSON)
-  public ExternalServiceCredentials getAuth(final @Auth AuthenticatedAccount auth) {
-    return paymentsServiceCredentialsGenerator.generateForUuid(auth.getAccount().getUuid());
+  public ExternalServiceCredentials getAuth(final @Auth AuthenticatedDevice auth) {
+    return paymentsServiceCredentialsGenerator.generateForUuid(auth.accountIdentifier());
   }
 
   @GET
   @Path("/conversions")
   @Produces(MediaType.APPLICATION_JSON)
-  public CurrencyConversionEntityList getConversions(final @Auth AuthenticatedAccount auth) {
+  public CurrencyConversionEntityList getConversions(final @Auth AuthenticatedDevice auth) {
     return currencyManager.getCurrencyConversions().orElseThrow();
   }
 }

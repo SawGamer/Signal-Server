@@ -5,10 +5,10 @@
 package org.whispersystems.websocket.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import javax.validation.Valid;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.whispersystems.websocket.logging.WebsocketRequestLoggerFactory;
 
 public class WebSocketConfiguration {
@@ -28,6 +28,14 @@ public class WebSocketConfiguration {
   @JsonProperty
   private int maxTextMessageSize = 512 * 1024;
 
+  @Valid
+  @JsonProperty
+  private boolean disablePerMessageDeflate = false;
+
+  @Valid
+  @JsonProperty
+  private boolean disableCrossMessageOutgoingCompression = false;
+
   public WebsocketRequestLoggerFactory getRequestLog() {
     return requestLog;
   }
@@ -38,5 +46,13 @@ public class WebSocketConfiguration {
 
   public int getMaxTextMessageSize() {
     return maxTextMessageSize;
+  }
+
+  public boolean isDisablePerMessageDeflate() {
+    return disablePerMessageDeflate;
+  }
+
+  public boolean isDisableCrossMessageOutgoingCompression() {
+    return disableCrossMessageOutgoingCompression;
   }
 }

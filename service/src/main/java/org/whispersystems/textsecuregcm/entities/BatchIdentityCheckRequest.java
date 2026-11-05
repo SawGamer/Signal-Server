@@ -7,47 +7,36 @@ package org.whispersystems.textsecuregcm.entities;
 
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import java.util.List;
-import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
-import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.util.ExactlySize;
 import org.whispersystems.textsecuregcm.util.ServiceIdentifierAdapter;
 
-public record BatchIdentityCheckRequest(@Valid @NotNull @Size(max = 1000) List<Element> elements) {
+@Schema(description = "Request to check identity key fingerprints for multiple accounts")
+public record BatchIdentityCheckRequest(
+    @Schema(description = "List of accounts to check")
+    @Valid @NotNull @Size(max = 1000) List<Element> elements) {
 
   /**
    * @param uuid        account id or phone number id
    * @param fingerprint most significant 4 bytes of SHA-256 of the 33-byte identity key field (32-byte curve25519 public
    *                    key prefixed with 0x05)
    */
-  public record Element(@Nullable
-                        @JsonSerialize(using = ServiceIdentifierAdapter.ServiceIdentifierSerializer.class)
-                        @JsonDeserialize(using = ServiceIdentifierAdapter.ServiceIdentifierDeserializer.class)
-                        ServiceIdentifier uuid,
+  @Schema(description = "A service identifier and expected identity key fingerprint")
+  public record Element(
+      @Schema(description = "Identifier (ACI or PNI)")
+      @NotNull
+      @JsonSerialize(using = ServiceIdentifierAdapter.ServiceIdentifierSerializer.class)
+      @JsonDeserialize(using = ServiceIdentifierAdapter.ServiceIdentifierDeserializer.class)
+      ServiceIdentifier uuid,
 
-                        @Nullable
-                        @Deprecated // remove after 2023-11-01
-                        @JsonSerialize(using = ServiceIdentifierAdapter.ServiceIdentifierSerializer.class)
-                        @JsonDeserialize(using = ServiceIdentifierAdapter.AciServiceIdentifierDeserializer.class)
-                        AciServiceIdentifier aci,
-
-                        @NotNull
-                        @ExactlySize(4)
-                        byte[] fingerprint) {
-
-    public Element {
-      if (aci == null && uuid == null) {
-        throw new IllegalArgumentException("aci and uuid cannot both be null");
-      }
-
-      if (aci != null && uuid != null) {
-        throw new IllegalArgumentException("aci and uuid cannot both be non-null");
-      }
-    }
+      @Schema(description = "Expected identity key fingerprint (4 bytes, most significant bytes of SHA-256 hash of 33-byte identity key field)")
+      @NotNull
+      @ExactlySize(4)
+      byte[] fingerprint) {
   }
-
 }

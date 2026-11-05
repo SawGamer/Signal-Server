@@ -8,6 +8,8 @@ package org.whispersystems.textsecuregcm.storage;
 import java.util.Collections;
 import java.util.List;
 import org.whispersystems.textsecuregcm.backup.BackupsDb;
+import org.whispersystems.textsecuregcm.scheduler.JobScheduler;
+import org.whispersystems.textsecuregcm.storage.devicecheck.AppleDeviceChecks;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
@@ -57,6 +59,15 @@ public final class DynamoDbExtensionSchema {
             .attributeType(ScalarAttributeType.B).build()),
         Collections.emptyList(), Collections.emptyList()),
 
+    CHANGE_NUMBER_WAITING_PERIODS("change_number_waiting_periods_test",
+        ChangeNumberWaitingPeriods.KEY_ACCOUNT_UUID,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(ChangeNumberWaitingPeriods.KEY_ACCOUNT_UUID)
+            .attributeType(ScalarAttributeType.B)
+            .build()),
+        List.of(), List.of()),
+
     CLIENT_RELEASES("client_releases_test",
         ClientReleases.ATTR_PLATFORM,
         ClientReleases.ATTR_VERSION,
@@ -73,11 +84,11 @@ public final class DynamoDbExtensionSchema {
         List.of()),
 
     DELETED_ACCOUNTS("deleted_accounts_test",
-        Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_E164,
+        Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_PNI,
         null,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_E164)
+                .attributeName(Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_PNI)
                 .attributeType(ScalarAttributeType.S).build(),
             AttributeDefinition.builder()
                 .attributeName(Accounts.DELETED_ACCOUNTS_ATTR_ACCOUNT_UUID)
@@ -85,7 +96,7 @@ public final class DynamoDbExtensionSchema {
                 .build()),
         List.of(
             GlobalSecondaryIndex.builder()
-                .indexName(Accounts.DELETED_ACCOUNTS_UUID_TO_E164_INDEX_NAME)
+                .indexName(Accounts.DELETED_ACCOUNTS_UUID_TO_PNI_INDEX_NAME)
                 .keySchema(
                     KeySchemaElement.builder().attributeName(Accounts.DELETED_ACCOUNTS_ATTR_ACCOUNT_UUID).keyType(KeyType.HASH).build()
                 )
@@ -96,12 +107,20 @@ public final class DynamoDbExtensionSchema {
     ),
 
     DELETED_ACCOUNTS_LOCK("deleted_accounts_lock_test",
-        AccountLockManager.KEY_ACCOUNT_E164,
+        AccountLockManager.KEY_ACCOUNT_PNI,
         null,
         List.of(AttributeDefinition.builder()
-            .attributeName(AccountLockManager.KEY_ACCOUNT_E164)
+            .attributeName(AccountLockManager.KEY_ACCOUNT_PNI)
             .attributeType(ScalarAttributeType.S).build()),
         List.of(), List.of()),
+
+    DONATION_PERMITS("donation_permits_test",
+        DonationPermits.KEY_SPEND_ID,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(DonationPermits.KEY_SPEND_ID)
+            .attributeType(ScalarAttributeType.B)
+            .build()), List.of(), List.of()),
 
     NUMBERS("numbers_test",
         Accounts.ATTR_ACCOUNT_E164,
@@ -113,30 +132,30 @@ public final class DynamoDbExtensionSchema {
         List.of(), List.of()),
 
     EC_KEYS("keys_test",
-        SingleUsePreKeyStore.KEY_ACCOUNT_UUID,
-        SingleUsePreKeyStore.KEY_DEVICE_ID_KEY_ID,
+        SingleUseECPreKeyStore.KEY_ACCOUNT_UUID,
+        SingleUseECPreKeyStore.KEY_DEVICE_ID_KEY_ID,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(SingleUsePreKeyStore.KEY_ACCOUNT_UUID)
+                .attributeName(SingleUseECPreKeyStore.KEY_ACCOUNT_UUID)
                 .attributeType(ScalarAttributeType.B)
                 .build(),
             AttributeDefinition.builder()
-                .attributeName(SingleUsePreKeyStore.KEY_DEVICE_ID_KEY_ID)
+                .attributeName(SingleUseECPreKeyStore.KEY_DEVICE_ID_KEY_ID)
                 .attributeType(ScalarAttributeType.B)
                 .build()),
         List.of(), List.of()),
 
-    PQ_KEYS("pq_keys_test",
-        SingleUsePreKeyStore.KEY_ACCOUNT_UUID,
-        SingleUsePreKeyStore.KEY_DEVICE_ID_KEY_ID,
+    PAGED_PQ_KEYS("paged_pq_keys_test",
+        PagedSingleUseKEMPreKeyStore.KEY_ACCOUNT_UUID,
+        PagedSingleUseKEMPreKeyStore.KEY_DEVICE_ID,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(SingleUsePreKeyStore.KEY_ACCOUNT_UUID)
+                .attributeName(PagedSingleUseKEMPreKeyStore.KEY_ACCOUNT_UUID)
                 .attributeType(ScalarAttributeType.B)
                 .build(),
             AttributeDefinition.builder()
-                .attributeName(SingleUsePreKeyStore.KEY_DEVICE_ID_KEY_ID)
-                .attributeType(ScalarAttributeType.B)
+                .attributeName(PagedSingleUseKEMPreKeyStore.KEY_DEVICE_ID)
+                .attributeType(ScalarAttributeType.N)
                 .build()),
         List.of(), List.of()),
 
@@ -215,20 +234,8 @@ public final class DynamoDbExtensionSchema {
         MessagesDynamoDb.KEY_SORT,
         List.of(
             AttributeDefinition.builder().attributeName(MessagesDynamoDb.KEY_PARTITION).attributeType(ScalarAttributeType.B).build(),
-            AttributeDefinition.builder().attributeName(MessagesDynamoDb.KEY_SORT).attributeType(ScalarAttributeType.B).build(),
-            AttributeDefinition.builder().attributeName(MessagesDynamoDb.LOCAL_INDEX_MESSAGE_UUID_KEY_SORT)
-                .attributeType(ScalarAttributeType.B).build()),
-        List.of(),
-        List.of(LocalSecondaryIndex.builder()
-            .indexName(MessagesDynamoDb.LOCAL_INDEX_MESSAGE_UUID_NAME)
-            .keySchema(
-                KeySchemaElement.builder().attributeName(MessagesDynamoDb.KEY_PARTITION).keyType(KeyType.HASH).build(),
-                KeySchemaElement.builder()
-                    .attributeName(MessagesDynamoDb.LOCAL_INDEX_MESSAGE_UUID_KEY_SORT)
-                    .keyType(KeyType.RANGE)
-                    .build())
-            .projection(Projection.builder().projectionType(ProjectionType.KEYS_ONLY).build())
-            .build())),
+            AttributeDefinition.builder().attributeName(MessagesDynamoDb.KEY_SORT).attributeType(ScalarAttributeType.B).build()),
+        List.of(), List.of()),
 
     ONETIME_DONATIONS("onetime_donations_test",
         OneTimeDonationsManager.KEY_PAYMENT_ID,
@@ -253,6 +260,29 @@ public final class DynamoDbExtensionSchema {
                 .build()),
         List.of(), List.of()),
 
+    PROFILE_AVATARS("profileAvatars_test",
+        ProfileAvatars.KEY_IDENTITY,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(ProfileAvatars.KEY_IDENTITY)
+            .attributeType(ScalarAttributeType.B)
+            .build()),
+        List.of(), List.of()),
+
+    PROFILES_V2("profilesV2_test",
+        ProfilesV2.KEY_ACCOUNT_UUID,
+        ProfilesV2.KEY_VERSION,
+        List.of(
+            AttributeDefinition.builder()
+                .attributeName(ProfilesV2.KEY_ACCOUNT_UUID)
+                .attributeType(ScalarAttributeType.B)
+                .build(),
+            AttributeDefinition.builder()
+                .attributeName(ProfilesV2.KEY_VERSION)
+                .attributeType(ScalarAttributeType.B)
+                .build()),
+        List.of(), List.of()),
+
     PUSH_CHALLENGES("push_challenge_test",
         PushChallengeDynamoDb.KEY_ACCOUNT_UUID,
         null,
@@ -271,11 +301,11 @@ public final class DynamoDbExtensionSchema {
             .build()),
         List.of(), List.of()),
 
-    REGISTRATION_RECOVERY_PASSWORDS("registration_recovery_passwords_test",
-        RegistrationRecoveryPasswords.KEY_E164,
+    PHONE_NUMBER_RECOVERY_PASSWORDS("registration_recovery_passwords_test",
+        PhoneNumberRecoveryPasswords.KEY_PNI,
         null,
         List.of(AttributeDefinition.builder()
-            .attributeName(RegistrationRecoveryPasswords.KEY_E164)
+            .attributeName(PhoneNumberRecoveryPasswords.KEY_PNI)
             .attributeType(ScalarAttributeType.S)
             .build()),
         List.of(), List.of()),
@@ -298,22 +328,46 @@ public final class DynamoDbExtensionSchema {
             .build()),
         List.of(), List.of()),
 
+    SANDBOX_ACCOUNTS("sandbox_accounts_test",
+        SandboxAccounts.KEY_ACCOUNT_UUID,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(SandboxAccounts.KEY_ACCOUNT_UUID)
+            .attributeType(ScalarAttributeType.B)
+            .build()),
+        List.of(), List.of()),
+
+    SCHEDULED_JOBS("scheduled_jobs_test",
+        JobScheduler.KEY_SCHEDULER_NAME,
+        JobScheduler.ATTR_RUN_AT,
+        List.of(AttributeDefinition.builder()
+                .attributeName(JobScheduler.KEY_SCHEDULER_NAME)
+                .attributeType(ScalarAttributeType.S)
+                .build(),
+
+            AttributeDefinition.builder()
+                .attributeName(JobScheduler.ATTR_RUN_AT)
+                .attributeType(ScalarAttributeType.B)
+                .build()),
+        List.of(),
+        List.of()),
+
     SUBSCRIPTIONS("subscriptions_test",
-        SubscriptionManager.KEY_USER,
+        Subscriptions.KEY_USER,
         null,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(SubscriptionManager.KEY_USER)
+                .attributeName(Subscriptions.KEY_USER)
                 .attributeType(ScalarAttributeType.B)
                 .build(),
             AttributeDefinition.builder()
-                .attributeName(SubscriptionManager.KEY_PROCESSOR_ID_CUSTOMER_ID)
+                .attributeName(Subscriptions.KEY_PROCESSOR_ID_CUSTOMER_ID)
                 .attributeType(ScalarAttributeType.B)
                 .build()),
         List.of(GlobalSecondaryIndex.builder()
-            .indexName(SubscriptionManager.INDEX_NAME)
+            .indexName(Subscriptions.INDEX_NAME)
             .keySchema(KeySchemaElement.builder()
-                .attributeName(SubscriptionManager.KEY_PROCESSOR_ID_CUSTOMER_ID)
+                .attributeName(Subscriptions.KEY_PROCESSOR_ID_CUSTOMER_ID)
                 .keyType(KeyType.HASH)
                 .build())
             .projection(Projection.builder()
@@ -324,6 +378,16 @@ public final class DynamoDbExtensionSchema {
                 .writeCapacityUnits(20L)
                 .build())
             .build()),
+        List.of()),
+
+    USED_LINK_DEVICE_TOKENS("used_link_device_tokens_test",
+        Accounts.KEY_LINK_DEVICE_TOKEN_HASH,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(Accounts.KEY_LINK_DEVICE_TOKEN_HASH)
+            .attributeType(ScalarAttributeType.B)
+            .build()),
+        List.of(),
         List.of()),
 
     USERNAMES("usernames_test",
@@ -341,6 +405,28 @@ public final class DynamoDbExtensionSchema {
         List.of(AttributeDefinition.builder()
             .attributeName(VerificationSessions.KEY_KEY)
             .attributeType(ScalarAttributeType.S)
+            .build()),
+        List.of(), List.of()),
+
+    APPLE_DEVICE_CHECKS("apple_device_check",
+        AppleDeviceChecks.KEY_ACCOUNT_UUID,
+        AppleDeviceChecks.KEY_PUBLIC_KEY_ID,
+        List.of(AttributeDefinition.builder()
+                .attributeName(AppleDeviceChecks.KEY_ACCOUNT_UUID)
+                .attributeType(ScalarAttributeType.B)
+                .build(),
+            AttributeDefinition.builder()
+                .attributeName(AppleDeviceChecks.KEY_PUBLIC_KEY_ID)
+                .attributeType(ScalarAttributeType.B)
+                .build()),
+        List.of(), List.of()),
+
+    APPLE_DEVICE_CHECKS_KEY_CONSTRAINT("apple_device_check_key_constraint",
+        AppleDeviceChecks.KEY_PUBLIC_KEY,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(AppleDeviceChecks.KEY_PUBLIC_KEY)
+            .attributeType(ScalarAttributeType.B)
             .build()),
         List.of(), List.of());
 

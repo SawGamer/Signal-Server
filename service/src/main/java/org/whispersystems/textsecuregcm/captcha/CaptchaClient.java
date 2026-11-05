@@ -5,9 +5,11 @@
 
 package org.whispersystems.textsecuregcm.captcha;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public interface CaptchaClient {
 
@@ -26,16 +28,40 @@ public interface CaptchaClient {
   /**
    * Verify a provided captcha solution
    *
-   * @param siteKey identifying string for the captcha service
-   * @param action  an action indicating the purpose of the captcha
-   * @param token   the captcha solution that will be verified
-   * @param ip      the ip of the captcha solver
+   * @param maybeAci  optional account service identifier of the user
+   * @param siteKey   identifying string for the captcha service
+   * @param action    an action indicating the purpose of the captcha
+   * @param token     the captcha solution that will be verified
+   * @param ip        the ip of the captcha solver
+   * @param userAgent the User-Agent string of the captcha solver
    * @return An {@link AssessmentResult} indicating whether the solution should be accepted
    * @throws IOException if the underlying captcha provider returns an error
    */
   AssessmentResult verify(
+      final Optional<UUID> maybeAci,
       final String siteKey,
       final Action action,
       final String token,
-      final String ip) throws IOException;
+      final String ip,
+      @Nullable final String userAgent) throws IOException;
+
+  static CaptchaClient noop() {
+    return new CaptchaClient() {
+      @Override
+      public String scheme() {
+        return "noop";
+      }
+
+      @Override
+      public Set<String> validSiteKeys(final Action action) {
+        return Set.of("noop");
+      }
+
+      @Override
+      public AssessmentResult verify(final Optional<UUID> maybeAci, final String siteKey, final Action action, final String token, final String ip,
+          @Nullable final String userAgent) throws IOException {
+        return AssessmentResult.alwaysValid();
+      }
+    };
+  }
 }

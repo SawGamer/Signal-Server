@@ -6,78 +6,82 @@
 package org.whispersystems.textsecuregcm.controllers;
 
 import io.dropwizard.auth.Auth;
+import io.dropwizard.util.DataSize;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import java.security.SecureRandom;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedList;
 import java.util.List;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.glassfish.jersey.server.ManagedAsync;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.entities.StickerPackFormUploadAttributes;
 import org.whispersystems.textsecuregcm.entities.StickerPackFormUploadAttributes.StickerPackFormUploadItem;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
-import org.whispersystems.textsecuregcm.util.Constants;
-import org.whispersystems.textsecuregcm.util.Pair;
 
 @Path("/v1/sticker")
 @Tag(name = "Stickers")
 public class StickerController {
 
   private final RateLimiters        rateLimiters;
-  private final PolicySigner        policySigner;
   private final PostPolicyGenerator policyGenerator;
+  private final Clock               clock;
 
-  public StickerController(RateLimiters rateLimiters, String accessKey, String accessSecret, String region, String bucket) {
+  public static final int MAXIMUM_STICKER_SIZE_BYTES = (int) DataSize.kibibytes(300 + 1).toBytes(); // add 1 kiB for encryption overhead
+  public static final int MAXIMUM_STICKER_MANIFEST_SIZE_BYTES = (int) DataSize.kibibytes(10).toBytes();
+
+  public StickerController(final RateLimiters rateLimiters,
+      final PostPolicyGenerator postPolicyGenerator,
+      final Clock clock) {
     this.rateLimiters    = rateLimiters;
-    this.policySigner    = new PolicySigner(accessSecret, region);
-    this.policyGenerator = new PostPolicyGenerator(region, bucket, accessKey);
+    this.policyGenerator = postPolicyGenerator;
+    this.clock           = clock;
   }
 
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/pack/form/{count}")
-  public StickerPackFormUploadAttributes getStickersForm(@Auth AuthenticatedAccount auth,
+  @ManagedAsync
+  public StickerPackFormUploadAttributes getStickersForm(@Auth AuthenticatedDevice auth,
       @PathParam("count") @Min(1) @Max(201) int stickerCount)
       throws RateLimitExceededException {
-    rateLimiters.getStickerPackLimiter().validate(auth.getAccount().getUuid());
+    rateLimiters.getStickerPackLimiter().validate(auth.accountIdentifier());
 
-    ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
-    String packId = generatePackId();
-    String packLocation = "stickers/" + packId;
-    String manifestKey = packLocation + "/manifest.proto";
-    Pair<String, String> manifestPolicy = policyGenerator.createFor(now, manifestKey,
-        Constants.MAXIMUM_STICKER_MANIFEST_SIZE_BYTES);
-    String manifestSignature = policySigner.getSignature(now, manifestPolicy.second());
-    StickerPackFormUploadItem manifest = new StickerPackFormUploadItem(-1, manifestKey, manifestPolicy.first(),
-        "private", "AWS4-HMAC-SHA256",
-        now.format(PostPolicyGenerator.AWS_DATE_TIME), manifestPolicy.second(), manifestSignature);
+    final Instant currentTime = clock.instant();
+    final String packId = generatePackId();
+    final String packLocation = "stickers/" + packId;
+    final String manifestKey = packLocation + "/manifest.proto";
+    final PostPolicyGenerator.SignedPostPolicy manifestPolicy =
+        policyGenerator.createFor(manifestKey, MAXIMUM_STICKER_MANIFEST_SIZE_BYTES, currentTime);
 
-    List<StickerPackFormUploadItem> stickers = new LinkedList<>();
+    final StickerPackFormUploadItem manifest = new StickerPackFormUploadItem(-1, manifestKey, manifestPolicy.credential(),
+        PostPolicyGenerator.ACL, PostPolicyGenerator.ALGORITHM,
+        manifestPolicy.formattedTimestamp(), manifestPolicy.encodedPolicy(), manifestPolicy.signature());
+
+    final List<StickerPackFormUploadItem> stickers = new LinkedList<>();
 
     for (int i = 0; i < stickerCount; i++) {
-      String stickerKey = packLocation + "/full/" + i;
-      Pair<String, String> stickerPolicy = policyGenerator.createFor(now, stickerKey,
-          Constants.MAXIMUM_STICKER_SIZE_BYTES);
-      String stickerSignature = policySigner.getSignature(now, stickerPolicy.second());
-      stickers.add(new StickerPackFormUploadItem(i, stickerKey, stickerPolicy.first(), "private", "AWS4-HMAC-SHA256",
-          now.format(PostPolicyGenerator.AWS_DATE_TIME), stickerPolicy.second(), stickerSignature));
+      final String stickerKey = packLocation + "/full/" + i;
+      final PostPolicyGenerator.SignedPostPolicy stickerPolicy =
+          policyGenerator.createFor(stickerKey, MAXIMUM_STICKER_SIZE_BYTES, currentTime);
+      stickers.add(new StickerPackFormUploadItem(i, stickerKey, stickerPolicy.credential(), PostPolicyGenerator.ACL, PostPolicyGenerator.ALGORITHM,
+          manifestPolicy.formattedTimestamp(), stickerPolicy.encodedPolicy(), stickerPolicy.signature()));
     }
 
     return new StickerPackFormUploadAttributes(packId, manifest, stickers);
   }
 
   private String generatePackId() {
-    byte[] object = new byte[16];
+    final byte[] object = new byte[16];
     new SecureRandom().nextBytes(object);
 
     return HexFormat.of().formatHex(object);

@@ -11,18 +11,63 @@
   <artifactId>service</artifactId>
 
   <properties>
-    <firebase-admin.version>9.2.0</firebase-admin.version>
-    <java-uuid-generator.version>4.3.0</java-uuid-generator.version>
-    <sqlite4java.version>1.0.392</sqlite4java.version>
+    <apollo-api-jvm.version>3.8.6</apollo-api-jvm.version>
+    <commons-compress.version>1.28.0</commons-compress.version>
+    <dynamodb-lock-client.version>1.5.0</dynamodb-lock-client.version>
+    <firebase-admin.version>9.11.0</firebase-admin.version>
+    <libphonenumber-geocoder.version>3.42</libphonenumber-geocoder.version>
+    <google-androidpublisher.version>v3-rev20250904-2.0.0</google-androidpublisher.version>
+    <java-jwt.version>4.6.2</java-jwt.version>
+    <java-uuid-generator.version>5.2.0</java-uuid-generator.version>
+    <!-- *all* opentelemetry-logback-appender versions are "alpha" despite the advanced version number -->
+    <opentelemetry-logback-appender-1.0.version>${opentelemetry-instrumentation.version}-alpha</opentelemetry-logback-appender-1.0.version>
+    <storekit.version>5.2.0</storekit.version>
   </properties>
 
   <dependencies>
     <dependency>
+      <groupId>com.auth0</groupId>
+      <artifactId>java-jwt</artifactId>
+      <version>${java-jwt.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-androidpublisher</artifactId>
+      <version>${google-androidpublisher.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.apple.itunes.storekit</groupId>
+      <artifactId>app-store-server-library</artifactId>
+      <version>${storekit.version}</version>
+      <exclusions>
+        <!-- conflicts with other users; resolved manually with explicit import -->
+        <exclusion>
+          <groupId>com.squareup.okio</groupId>
+          <artifactId>okio-jvm</artifactId>
+        </exclusion>
+        <!-- conflicts with our direct dependency -->
+        <exclusion>
+          <groupId>com.auth0</groupId>
+          <artifactId>java-jwt</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.webauthn4j</groupId>
+      <artifactId>webauthn4j-appattest</artifactId>
+      <version>${webauthn4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.webauthn4j</groupId>
+      <artifactId>webauthn4j-core</artifactId>
+      <version>${webauthn4j.version}</version>
+    </dependency>
+    <dependency>
       <groupId>io.swagger.core.v3</groupId>
-      <artifactId>swagger-jaxrs2</artifactId>
+      <artifactId>swagger-jaxrs2-jakarta</artifactId>
       <version>${swagger.version}</version>
       <exclusions>
-        <!-- org.yaml:snakeyaml is causing a dependency convergence error -->
+        <!-- conflicts with jackson-dataformat-yaml -->
         <exclusion>
           <groupId>org.yaml</groupId>
           <artifactId>snakeyaml</artifactId>
@@ -53,6 +98,11 @@
     </dependency>
 
     <dependency>
+      <groupId>org.signal</groupId>
+      <artifactId>simple-grpc-runtime</artifactId>
+    </dependency>
+
+    <dependency>
       <groupId>io.dropwizard</groupId>
       <artifactId>dropwizard-core</artifactId>
     </dependency>
@@ -66,7 +116,7 @@
     </dependency>
     <dependency>
       <groupId>io.dropwizard</groupId>
-      <artifactId>dropwizard-db</artifactId>
+      <artifactId>dropwizard-http2</artifactId>
     </dependency>
     <dependency>
       <groupId>io.dropwizard</groupId>
@@ -97,6 +147,11 @@
       <artifactId>dropwizard-jetty</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.eclipse.jetty.http2</groupId>
+      <artifactId>jetty-http2-client-transport</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>io.dropwizard</groupId>
       <artifactId>dropwizard-validation</artifactId>
     </dependency>
@@ -115,8 +170,8 @@
       <artifactId>logback-core</artifactId>
     </dependency>
     <dependency>
-      <groupId>ch.qos.logback</groupId>
-      <artifactId>logback-access</artifactId>
+      <groupId>ch.qos.logback.access</groupId>
+      <artifactId>logback-access-common</artifactId>
     </dependency>
     <dependency>
       <groupId>ch.qos.logback</groupId>
@@ -125,6 +180,20 @@
     <dependency>
       <groupId>net.logstash.logback</groupId>
       <artifactId>logstash-logback-encoder</artifactId>
+      <exclusions>
+        <!-- conflicts with webauthn4j-appattest -->
+        <exclusion>
+          <groupId>tools.jackson.core</groupId>
+          <artifactId>jackson-databind</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- sentinel for dependency convergence -->
+    <dependency>
+      <groupId>tools.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <!-- update dependabot.yml when this dependency is removed -->
+      <version>3.2.3</version>
     </dependency>
 
     <dependency>
@@ -151,15 +220,32 @@
       <groupId>org.glassfish.jersey.core</groupId>
       <artifactId>jersey-client</artifactId>
     </dependency>
-    <dependency>
-      <groupId>org.glassfish.jaxb</groupId>
-      <artifactId>jaxb-runtime</artifactId>
-    </dependency>
 
     <dependency>
       <groupId>io.dropwizard</groupId>
       <artifactId>dropwizard-testing</artifactId>
       <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-exporter-otlp</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry.instrumentation</groupId>
+      <artifactId>opentelemetry-logback-appender-1.0</artifactId>
+      <version>${opentelemetry-logback-appender-1.0.version}</version>
+      <exclusions>
+        <!-- conflicts with google-cloud-firestore; incubator packages aren't included in the opentelemetry BOM, and we don't use them -->
+        <exclusion>
+          <groupId>io.opentelemetry.instrumentation</groupId>
+          <artifactId>opentelemetry-instrumentation-api-incubator</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>
@@ -184,11 +270,16 @@
 
     <dependency>
       <groupId>org.eclipse.jetty.websocket</groupId>
-      <artifactId>websocket-jetty-api</artifactId>
+      <artifactId>jetty-websocket-jetty-api</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.eclipse.jetty</groupId>
-      <artifactId>jetty-servlets</artifactId>
+      <groupId>org.eclipse.jetty.ee10</groupId>
+      <artifactId>jetty-ee10-servlets</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.eclipse.jetty.websocket</groupId>
+      <artifactId>jetty-websocket-jetty-client</artifactId>
+      <scope>test</scope>
     </dependency>
 
     <dependency>
@@ -199,11 +290,35 @@
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-csv</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-compress</artifactId>
+      <version>${commons-compress.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-pubsub</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>com.google.firebase</groupId>
       <artifactId>firebase-admin</artifactId>
       <version>${firebase-admin.version}</version>
+      <exclusions>
+        <exclusion>
+          <!-- google-cloud-storage pins 4.2.2, but jackson-dataformat-xml 2.22.x wants 4.3.0 -->
+          <groupId>org.codehaus.woodstox</groupId>
+          <artifactId>stax2-api</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <dependency>
+      <!-- jackson-dataformat-xml (via firebase-admin), wants >= 4.3.0 -->
+      <groupId>org.codehaus.woodstox</groupId>
+      <artifactId>stax2-api</artifactId>
+      <version>4.3.2</version>
     </dependency>
 
     <dependency>
@@ -211,6 +326,10 @@
       <artifactId>jsr305</artifactId>
     </dependency>
 
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-bulkhead</artifactId>
+    </dependency>
     <dependency>
       <groupId>io.github.resilience4j</groupId>
       <artifactId>resilience4j-circuitbreaker</artifactId>
@@ -226,8 +345,7 @@
 
     <dependency>
       <groupId>io.grpc</groupId>
-      <artifactId>grpc-netty-shaded</artifactId>
-      <scope>runtime</scope>
+      <artifactId>grpc-netty</artifactId>
     </dependency>
     <dependency>
       <groupId>io.grpc</groupId>
@@ -250,11 +368,7 @@
     </dependency>
     <dependency>
       <groupId>io.micrometer</groupId>
-      <artifactId>micrometer-registry-statsd</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.coursera</groupId>
-      <artifactId>dropwizard-metrics-datadog</artifactId>
+      <artifactId>micrometer-registry-otlp</artifactId>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
@@ -282,8 +396,8 @@
     </dependency>
 
     <dependency>
-      <groupId>com.salesforce.servicelibs</groupId>
-      <artifactId>reactor-grpc-stub</artifactId>
+      <groupId>org.foundationdb</groupId>
+      <artifactId>fdb-java</artifactId>
     </dependency>
 
     <dependency>
@@ -307,28 +421,19 @@
       <artifactId>dynamodb</artifactId>
     </dependency>
     <dependency>
-      <groupId>software.amazon.awssdk</groupId>
-      <artifactId>appconfig</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>software.amazon.awssdk</groupId>
-      <artifactId>appconfigdata</artifactId>
-    </dependency>
-    <dependency>
       <groupId>com.amazonaws</groupId>
       <artifactId>dynamodb-lock-client</artifactId>
-      <version>1.2.0</version>
-      <exclusions>
-        <exclusion>
-          <groupId>commons-logging</groupId>
-          <artifactId>commons-logging</artifactId>
-        </exclusion>
-      </exclusions>
+      <version>${dynamodb-lock-client.version}</version>
     </dependency>
 
     <dependency>
       <groupId>io.lettuce</groupId>
       <artifactId>lettuce-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.eatthepath</groupId>
+      <artifactId>java-otp</artifactId>
     </dependency>
 
     <dependency>
@@ -360,32 +465,97 @@
       <artifactId>libphonenumber</artifactId>
     </dependency>
 
+    <!-- Provides tools for mapping phone numbers to time zones, which is helpful for scheduling push notifications
+    during waking hours -->
+    <dependency>
+      <groupId>com.googlecode.libphonenumber</groupId>
+      <artifactId>geocoder</artifactId>
+      <version>${libphonenumber-geocoder.version}</version>
+    </dependency>
+
     <dependency>
       <groupId>net.sourceforge.argparse4j</groupId>
       <artifactId>argparse4j</artifactId>
     </dependency>
 
     <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-buffer</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-haproxy</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-http2</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-common</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-resolver</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-resolver-dns</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-tcnative-boringssl-static</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+      <classifier>linux-x86_64</classifier>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-pkitesting</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-testsuite-common</artifactId>
+      <scope>test</scope>
+      <version>${netty.version}</version>
+    </dependency>
+
+    <dependency>
       <groupId>org.glassfish.jersey.test-framework</groupId>
       <artifactId>jersey-test-framework-core</artifactId>
       <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>junit</groupId>
+          <artifactId>junit</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.glassfish.jersey.test-framework.providers</groupId>
       <artifactId>jersey-test-framework-provider-grizzly2</artifactId>
-      <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <groupId>javax.servlet</groupId>
-          <artifactId>javax.servlet-api</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>com.almworks.sqlite4java</groupId>
-      <artifactId>sqlite4java</artifactId>
-      <version>${sqlite4java.version}</version>
       <scope>test</scope>
     </dependency>
 
@@ -396,10 +566,6 @@
     <dependency>
       <groupId>io.projectreactor</groupId>
       <artifactId>reactor-core-micrometer</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.vavr</groupId>
-      <artifactId>vavr</artifactId>
     </dependency>
 
     <dependency>
@@ -414,8 +580,15 @@
     </dependency>
 
     <dependency>
-      <groupId>org.signal</groupId>
-      <artifactId>embedded-redis</artifactId>
+      <groupId>com.redis</groupId>
+      <artifactId>testcontainers-redis</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>com.webauthn4j</groupId>
+      <artifactId>webauthn4j-test</artifactId>
+      <version>${webauthn4j.version}</version>
       <scope>test</scope>
     </dependency>
 
@@ -427,16 +600,20 @@
     </dependency>
 
     <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>DynamoDBLocal</artifactId>
-      <version>1.23.0</version>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-localstack</artifactId>
       <scope>test</scope>
     </dependency>
+
     <dependency>
-      <groupId>io.github.ganadist.sqlite4java</groupId>
-      <artifactId>libsqlite4java-osx-aarch64</artifactId>
-      <version>${sqlite4java.version}</version>
-      <type>dylib</type>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>earth.adi</groupId>
+      <artifactId>testcontainers-foundationdb</artifactId>
       <scope>test</scope>
     </dependency>
 
@@ -446,8 +623,9 @@
     </dependency>
 
     <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-recaptchaenterprise</artifactId>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+      <scope>compile</scope>
     </dependency>
 
     <dependency>
@@ -463,14 +641,28 @@
     <dependency>
       <groupId>com.apollographql.apollo3</groupId>
       <artifactId>apollo-api-jvm</artifactId>
-      <version>3.8.2</version>
+      <version>${apollo-api-jvm.version}</version>
 
       <exclusions>
+        <!-- conflicts with kotlin-stdlib -->
         <exclusion>
           <groupId>org.jetbrains</groupId>
           <artifactId>annotations</artifactId>
         </exclusion>
+        <!-- conflicts with other users; resolved manually with explicit import -->
+        <exclusion>
+          <groupId>com.squareup.okio</groupId>
+          <artifactId>okio-jvm</artifactId>
+        </exclusion>
       </exclusions>
+    </dependency>
+
+    <!-- to resolve conflicting imports from other dependencies -->
+    <dependency>
+      <groupId>com.squareup.okio</groupId>
+      <artifactId>okio-jvm</artifactId>
+      <!-- update dependabot.yml when this dependency is removed -->
+      <version>3.18.1</version>
     </dependency>
 
   </dependencies>
@@ -481,9 +673,31 @@
       <build>
         <plugins>
           <plugin>
+            <groupId>io.github.download-maven-plugin</groupId>
+            <artifactId>download-maven-plugin</artifactId>
+            <version>2.1.0</version>
+
+            <executions>
+              <execution>
+                <id>install-foundationdb-client-library</id>
+                <phase>prepare-package</phase>
+                <goals>
+                  <goal>wget</goal>
+                </goals>
+              </execution>
+            </executions>
+
+            <configuration>
+              <url>https://github.com/apple/foundationdb/releases/download/${foundationdb.version}/libfdb_c.x86_64.so</url>
+              <outputDirectory>${project.build.directory}/jib-extra/usr/lib</outputDirectory>
+              <outputFileName>libfdb_c.so</outputFileName>
+              <sha256>${foundationdb.client-library-sha256}</sha256>
+            </configuration>
+          </plugin>
+
+          <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-shade-plugin</artifactId>
-            <version>3.5.1</version>
             <configuration>
               <createDependencyReducedPom>true</createDependencyReducedPom>
               <filters>
@@ -518,7 +732,6 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-assembly-plugin</artifactId>
-            <version>3.6.0</version>
             <configuration>
               <descriptors>
                 <descriptor>assembly.xml</descriptor>
@@ -538,7 +751,6 @@
           <plugin>
             <groupId>org.codehaus.mojo</groupId>
             <artifactId>properties-maven-plugin</artifactId>
-            <version>1.2.0</version>
             <executions>
               <execution>
                 <id>read-deploy-configuration</id>
@@ -566,7 +778,17 @@
             </executions>
             <configuration>
               <from>
-                <image>eclipse-temurin@sha256:${docker.image.sha256}</image>
+                <image>${docker.image}</image>
+                <platforms>
+                  <platform>
+                    <architecture>amd64</architecture>
+                    <os>linux</os>
+                  </platform>
+                  <platform>
+                    <architecture>arm64</architecture>
+                    <os>linux</os>
+                  </platform>
+                </platforms>
               </from>
               <to>
                 <image>${docker.repo}:${project.version}</image>
@@ -578,6 +800,8 @@
                   <jvmFlag>-Djava.awt.headless=true</jvmFlag>
                   <jvmFlag>-Djdk.nio.maxCachedBufferSize=262144</jvmFlag>
                   <jvmFlag>-Dlog4j2.formatMsgNoLookups=true</jvmFlag>
+                  <jvmFlag>-Djdk.tls.server.newSessionTicketCount=0</jvmFlag>
+                  <jvmFlag>-Djdk.tls.server.enableSessionTicketExtension=false</jvmFlag>
                   <jvmFlag>-XX:MaxRAMPercentage=75</jvmFlag>
                   <jvmFlag>-XX:+HeapDumpOnOutOfMemoryError</jvmFlag>
                   <jvmFlag>-XX:HeapDumpPath=/tmp/heapdump.bin</jvmFlag>
@@ -593,6 +817,9 @@
                     <from>${project.basedir}/config</from>
                     <includes>*.yml</includes>
                     <into>/usr/share/signal/</into>
+                  </path>
+                  <path>
+                    <from>${project.build.directory}/jib-extra</from>
                   </path>
                 </paths>
               </extraDirectories>
@@ -616,6 +843,30 @@
         </plugins>
       </build>
     </profile>
+    <profile>
+      <id>test-server</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>start-test-server</id>
+                <phase>integration-test</phase>
+                <goals>
+                  <goal>java</goal>
+                </goals>
+                <configuration>
+                  <mainClass>org.whispersystems.textsecuregcm.LocalWhisperServerService</mainClass>
+                  <classpathScope>test</classpathScope>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 
   <build>
@@ -624,12 +875,18 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>templating-maven-plugin</artifactId>
-        <version>1.0.0</version>
+        <version>3.1.1</version>
         <executions>
           <execution>
             <id>filter-src</id>
             <goals>
               <goal>filter-sources</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>filter-test-src</id>
+            <goals>
+              <goal>filter-test-sources</goal>
             </goals>
           </execution>
         </executions>
@@ -638,10 +895,9 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
-        <version>3.1.2</version>
         <configuration>
-          <!-- work around PATCH not being a supported method on HttpUrlConnection -->
-          <argLine>--add-opens=java.base/java.net=ALL-UNNAMED</argLine>
+          <!-- add-opens: work around PATCH not being a supported method on HttpUrlConnection -->
+          <argLine>-javaagent:${org.mockito:mockito-core:jar} --add-opens=java.base/java.net=ALL-UNNAMED</argLine>
         </configuration>
       </plugin>
 
@@ -660,7 +916,6 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.1.0</version>
         <executions>
           <execution>
             <id>check-all-service-config</id>
@@ -668,21 +923,21 @@
             <goals>
               <goal>java</goal>
             </goals>
+            <configuration>
+              <mainClass>org.whispersystems.textsecuregcm.CheckServiceConfigurations</mainClass>
+              <classpathScope>test</classpathScope>
+              <arguments>
+                <argument>${project.basedir}/config</argument>
+              </arguments>
+            </configuration>
           </execution>
         </executions>
-        <configuration>
-          <mainClass>org.whispersystems.textsecuregcm.CheckServiceConfigurations</mainClass>
-          <classpathScope>test</classpathScope>
-          <arguments>
-            <argument>${project.basedir}/config</argument>
-          </arguments>
-        </configuration>
       </plugin>
 
       <plugin>
         <groupId>com.github.aoudiamoncef</groupId>
         <artifactId>apollo-client-maven-plugin</artifactId>
-        <version>5.0.0</version>
+        <version>7.1.0</version>
         <executions>
           <execution>
             <goals>
@@ -695,6 +950,8 @@
                     <name>braintree</name>
                     <compilerParams>
                       <schemaPackageName>com.braintree.graphql.client</schemaPackageName>
+                      <!-- override the default in 7.1.0, see https://github.com/aoudiamoncef/apollo-client-maven-plugin/issues/84 -->
+                      <operationManifestFormat>none</operationManifestFormat>
                     </compilerParams>
                   </compilationUnit>
                 </braintree>

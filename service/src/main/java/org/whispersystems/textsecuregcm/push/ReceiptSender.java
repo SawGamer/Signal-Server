@@ -5,15 +5,16 @@
 
 package org.whispersystems.textsecuregcm.push;
 
-import io.micrometer.core.instrument.Metrics;
-import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
-import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 
@@ -29,9 +30,7 @@ public class ReceiptSender {
       final ExecutorService executor) {
     this.accountManager = accountManager;
     this.messageSender = messageSender;
-    this.executor = ExecutorServiceMetrics.monitor(
-        Metrics.globalRegistry, executor, MetricsUtil.name(ReceiptSender.class, "executor"), MetricsUtil.PREFIX)
-    ;
+    this.executor = executor;
   }
 
   public void sendReceipt(ServiceIdentifier sourceIdentifier, byte sourceDeviceId, AciServiceIdentifier destinationIdentifier, long messageId) {
@@ -43,23 +42,36 @@ public class ReceiptSender {
       try {
         accountManager.getByAccountIdentifier(destinationIdentifier.uuid()).ifPresentOrElse(
             destinationAccount -> {
-              final Envelope.Builder message = Envelope.newBuilder()
+              final Envelope message = Envelope.newBuilder()
                   .setServerTimestamp(System.currentTimeMillis())
-                  .setSourceUuid(sourceIdentifier.toServiceIdentifierString())
-                  .setSourceDevice((int) sourceDeviceId)
-                  .setDestinationUuid(destinationIdentifier.toServiceIdentifierString())
-                  .setTimestamp(messageId)
+                  .setSourceServiceId(sourceIdentifier.toCompactByteString())
+                  .setSourceDevice(sourceDeviceId)
+                  .setDestinationServiceId(destinationIdentifier.toCompactByteString())
+                  .setClientTimestamp(messageId)
                   .setType(Envelope.Type.SERVER_DELIVERY_RECEIPT)
-                  .setUrgent(false);
+                  .setUrgent(false)
+                  .build();
 
-              for (final Device destinationDevice : destinationAccount.getDevices()) {
-                try {
-                  messageSender.sendMessage(destinationAccount, destinationDevice, message.build(), false);
-                } catch (final NotPushRegisteredException e) {
-                  logger.debug("User no longer push registered for delivery receipt: {}", e.getMessage());
-                } catch (final Exception e) {
-                  logger.warn("Could not send delivery receipt", e);
-                }
+              final Map<Byte, Envelope> messagesByDeviceId = destinationAccount.getDevices().stream()
+                  .collect(Collectors.toMap(Device::getId, ignored -> message));
+
+              final Map<Byte, Integer> registrationIdsByDeviceId = destinationAccount.getDevices().stream()
+                  .collect(Collectors.toMap(Device::getId,
+                      device -> switch (destinationIdentifier.identityType()) {
+                        case ACI -> device.getAccountRegistrationId();
+                        case PNI -> device.getPhoneNumberIdentityRegistrationId()
+                            .orElseThrow(() -> new IllegalStateException("Destination account identified by PNI has device without PNI registration ID"));
+                      }));
+
+              try {
+                messageSender.sendMessages(destinationAccount,
+                    destinationIdentifier,
+                    messagesByDeviceId,
+                    registrationIdsByDeviceId,
+                    Optional.empty(),
+                    UserAgentTagUtil.SERVER_UA);
+              } catch (final Exception e) {
+                logger.warn("Could not send delivery receipt", e);
               }
             },
             () -> logger.info("No longer registered: {}", destinationIdentifier)

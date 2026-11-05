@@ -7,6 +7,7 @@ package org.whispersystems.textsecuregcm.tests.util;
 
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicExperimentEnrollmentConfiguration;
+import org.whispersystems.textsecuregcm.experiment.ExperimentEnrollmentManager;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import java.util.Optional;
 import java.util.Set;
@@ -17,7 +18,7 @@ import static org.mockito.Mockito.when;
 
 public class ExperimentHelper {
 
-  public static DynamicConfigurationManager<DynamicConfiguration> withEnrollment(
+  private static DynamicConfigurationManager<DynamicConfiguration> withEnrollment(
       final String experimentName,
       final Set<UUID> enrolledUuids,
       final int enrollmentPercentage) {
@@ -26,16 +27,21 @@ public class ExperimentHelper {
     when(dcm.getConfiguration()).thenReturn(dc);
     final DynamicExperimentEnrollmentConfiguration exp = mock(DynamicExperimentEnrollmentConfiguration.class);
     when(dc.getExperimentEnrollmentConfiguration(experimentName)).thenReturn(Optional.of(exp));
-    when(exp.getEnrolledUuids()).thenReturn(enrolledUuids);
+    final DynamicExperimentEnrollmentConfiguration.UuidSelector uuidSelector =
+        mock(DynamicExperimentEnrollmentConfiguration.UuidSelector.class);
+    when(exp.getUuidSelector()).thenReturn(uuidSelector);
+
     when(exp.getEnrollmentPercentage()).thenReturn(enrollmentPercentage);
+    when(uuidSelector.getUuids()).thenReturn(enrolledUuids);
+    when(uuidSelector.getUuidEnrollmentPercentage()).thenReturn(100);
     return dcm;
   }
 
-  public static DynamicConfigurationManager<DynamicConfiguration> withEnrollment(final String experimentName, final Set<UUID> enrolledUuids) {
-    return withEnrollment(experimentName, enrolledUuids, 0);
+  public static ExperimentEnrollmentManager withEnrollment(final String experimentName, final Set<UUID> enrolledUuids) {
+    return new ExperimentEnrollmentManager(withEnrollment(experimentName, enrolledUuids, 0));
   }
 
-  public static DynamicConfigurationManager<DynamicConfiguration> withEnrollment(final String experimentName, final UUID enrolledUuid) {
-    return withEnrollment(experimentName, Set.of(enrolledUuid), 0);
+  public static ExperimentEnrollmentManager withEnrollment(final String experimentName, final UUID enrolledUuid) {
+    return new ExperimentEnrollmentManager(withEnrollment(experimentName, Set.of(enrolledUuid), 0));
   }
 }

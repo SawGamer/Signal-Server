@@ -9,88 +9,48 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import io.swagger.v3.oas.annotations.media.Schema;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
 
-// Note, this class cannot be converted into a record because @JsonUnwrapped does not work with records.
-// https://github.com/FasterXML/jackson-databind/issues/1467
-public class VersionedProfileResponse {
+@Schema(description = "Versioned profile containing encrypted fields. Versioned fields may be empty if the version was not found.")
+public record VersionedProfileResponse(
 
-  @JsonUnwrapped
-  private BaseProfileResponse baseProfileResponse;
+    @Schema(description = "Base profile information")
+    @JsonUnwrapped
+    BaseProfileResponse baseProfileResponse,
 
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
-  private byte[] name;
+    @Schema(description = "Encrypted profile name. Padded base64.")
+    @JsonProperty
+    @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+    @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+    byte[] name,
 
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
-  private byte[] about;
+    @Schema(description = "Encrypted about text. Padded base64.")
+    @JsonProperty
+    @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+    @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+    byte[] about,
 
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
-  private byte[] aboutEmoji;
+    @Schema(description = "Encrypted about emoji. Padded base64.")
+    @JsonProperty
+    @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+    @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+    byte[] aboutEmoji,
 
-  @JsonProperty
-  private String avatar;
+    @Schema(description = "Avatar CDN path")
+    @JsonProperty
+    String avatar,
 
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
-  private byte[] paymentAddress;
+    @Schema(description = "Encrypted payment address. Padded base64.")
+    @JsonProperty
+    @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+    @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+    byte[] paymentAddress,
 
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
-  private byte[] phoneNumberSharing;
+    @Schema(description = "Encrypted phone number sharing preference. Padded base64.")
+    @JsonProperty
+    @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+    @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+    byte[] phoneNumberSharing) {
 
-  public VersionedProfileResponse() {
-  }
-
-  public VersionedProfileResponse(final BaseProfileResponse baseProfileResponse,
-      final byte[] name,
-      final byte[] about,
-      final byte[] aboutEmoji,
-      final String avatar,
-      final byte[] paymentAddress,
-      final byte[] phoneNumberSharing) {
-
-    this.baseProfileResponse = baseProfileResponse;
-    this.name = name;
-    this.about = about;
-    this.aboutEmoji = aboutEmoji;
-    this.avatar = avatar;
-    this.paymentAddress = paymentAddress;
-    this.phoneNumberSharing = phoneNumberSharing;
-  }
-
-  public BaseProfileResponse getBaseProfileResponse() {
-    return baseProfileResponse;
-  }
-
-  public byte[] getName() {
-    return name;
-  }
-
-  public byte[] getAbout() {
-    return about;
-  }
-
-  public byte[] getAboutEmoji() {
-    return aboutEmoji;
-  }
-
-  public String getAvatar() {
-    return avatar;
-  }
-
-  public byte[] getPaymentAddress() {
-    return paymentAddress;
-  }
-
-  public byte[] getPhoneNumberSharing() {
-    return phoneNumberSharing;
-  }
 }

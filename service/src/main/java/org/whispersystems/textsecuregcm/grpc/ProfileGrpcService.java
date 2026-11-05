@@ -6,39 +6,50 @@
 package org.whispersystems.textsecuregcm.grpc;
 
 import com.google.protobuf.ByteString;
-import io.grpc.Status;
 import java.time.Clock;
-import java.time.ZonedDateTime;
-import java.util.ArrayList;
+import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import org.signal.chat.profile.CredentialType;
-import org.signal.chat.profile.GetExpiringProfileKeyCredentialRequest;
-import org.signal.chat.profile.GetExpiringProfileKeyCredentialResponse;
-import org.signal.chat.profile.GetUnversionedProfileRequest;
-import org.signal.chat.profile.GetUnversionedProfileResponse;
-import org.signal.chat.profile.GetVersionedProfileRequest;
-import org.signal.chat.profile.GetVersionedProfileResponse;
-import org.signal.chat.profile.ProfileAvatarUploadAttributes;
-import org.signal.chat.profile.ReactorProfileGrpc;
+import org.signal.chat.common.S3UploadForm;
+import org.signal.chat.errors.FailedPrecondition;
+import org.signal.chat.errors.NotFound;
+import org.signal.chat.profile.ExpectedVersionConflict;
+import org.signal.chat.profile.GetAvatarCredentialRequest;
+import org.signal.chat.profile.GetAvatarCredentialResponse;
+import org.signal.chat.profile.GetProfileRequest;
+import org.signal.chat.profile.GetProfileResponse;
+import org.signal.chat.profile.PaymentsForbiddenInRegion;
 import org.signal.chat.profile.SetProfileRequest;
-import org.signal.chat.profile.SetProfileRequest.AvatarChange;
 import org.signal.chat.profile.SetProfileResponse;
-import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
+import org.signal.chat.profile.SetProfileResult;
+import org.signal.chat.profile.SetProfileV1Request.AvatarChange;
+import org.signal.chat.profile.SetV1AvatarRequest;
+import org.signal.chat.profile.SetV1AvatarResponse;
+import org.signal.chat.profile.SimpleProfileGrpc;
+import org.signal.libsignal.protocol.ServiceId;
+import org.signal.libsignal.zkgroup.GenericServerSecretParams;
+import org.signal.libsignal.zkgroup.InvalidInputException;
+import org.signal.libsignal.zkgroup.VerificationFailedException;
+import org.signal.libsignal.zkgroup.avatars.AvatarUploadCredentialRequest;
+import org.signal.libsignal.zkgroup.avatars.AvatarUploadCredentialResponse;
+import org.whispersystems.textsecuregcm.asn.AsnInfoProvider;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticationUtil;
 import org.whispersystems.textsecuregcm.badges.ProfileBadgeConverter;
 import org.whispersystems.textsecuregcm.configuration.BadgeConfiguration;
 import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.identity.IdentityType;
+import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountBadge;
@@ -46,222 +57,266 @@ import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
 import org.whispersystems.textsecuregcm.storage.VersionedProfile;
-import org.whispersystems.textsecuregcm.util.Pair;
+import org.whispersystems.textsecuregcm.storage.VersionedProfileV1;
+import org.whispersystems.textsecuregcm.storage.WriteConflictException;
 import org.whispersystems.textsecuregcm.util.ProfileHelper;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
-import software.amazon.awssdk.services.s3.S3AsyncClient;
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 
-public class ProfileGrpcService extends ReactorProfileGrpc.ProfileImplBase {
+public class ProfileGrpcService extends SimpleProfileGrpc.ProfileImplBase {
 
   private final Clock clock;
   private final AccountsManager accountsManager;
   private final ProfilesManager  profilesManager;
+  private final Supplier<AsnInfoProvider> asnInfoProviderSupplier;
   private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
   private final Map<String, BadgeConfiguration> badgeConfigurationMap;
-  private final S3AsyncClient asyncS3client;
   private final PostPolicyGenerator policyGenerator;
-  private final PolicySigner policySigner;
+  private final GenericServerSecretParams genericServerSecretParams;
   private final ProfileBadgeConverter profileBadgeConverter;
   private final RateLimiters rateLimiters;
-  private final ServerZkProfileOperations zkProfileOperations;
-  private final String bucket;
 
   private record AvatarData(Optional<String> currentAvatar,
                             Optional<String>  finalAvatar,
-                            Optional<ProfileAvatarUploadAttributes> uploadAttributes) {}
+                            Optional<S3UploadForm> uploadAttributes) {}
 
   public ProfileGrpcService(
       final Clock clock,
       final AccountsManager accountsManager,
       final ProfilesManager profilesManager,
+      final Supplier<AsnInfoProvider> asnInfoProviderSupplier,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final BadgesConfiguration badgesConfiguration,
-      final S3AsyncClient asyncS3client,
       final PostPolicyGenerator policyGenerator,
-      final PolicySigner policySigner,
+      final GenericServerSecretParams genericServerSecretParams,
       final ProfileBadgeConverter profileBadgeConverter,
-      final RateLimiters rateLimiters,
-      final ServerZkProfileOperations zkProfileOperations,
-      final String bucket) {
+      final RateLimiters rateLimiters) {
     this.clock = clock;
     this.accountsManager = accountsManager;
     this.profilesManager = profilesManager;
+    this.asnInfoProviderSupplier = asnInfoProviderSupplier;
     this.dynamicConfigurationManager = dynamicConfigurationManager;
-    this.badgeConfigurationMap = badgesConfiguration.getBadges().stream().collect(Collectors.toMap(
-        BadgeConfiguration::getId, Function.identity()));
-    this.asyncS3client  = asyncS3client;
+    this.badgeConfigurationMap = badgesConfiguration.getBadges().stream()
+        .collect(Collectors.toMap(BadgeConfiguration::getId, Function.identity()));
     this.policyGenerator = policyGenerator;
-    this.policySigner = policySigner;
+    this.genericServerSecretParams = genericServerSecretParams;
     this.profileBadgeConverter = profileBadgeConverter;
     this.rateLimiters = rateLimiters;
-    this.zkProfileOperations = zkProfileOperations;
-    this.bucket = bucket;
   }
 
   @Override
-  public Mono<SetProfileResponse> setProfile(final SetProfileRequest request) {
+  public SetProfileResponse setProfile(final SetProfileRequest request) {
+
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+
+    final Account account = accountsManager.getByAccountIdentifier(authenticatedDevice.accountIdentifier())
+        .orElseThrow(() -> GrpcExceptions.invalidCredentials("invalid credentials"));
+
     validateRequest(request);
-    return Mono.fromSupplier(AuthenticationUtil::requireAuthenticatedDevice)
-        .flatMap(authenticatedDevice -> Mono.zip(
-            Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
-                .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException)),
-            Mono.fromFuture(() -> profilesManager.getAsync(authenticatedDevice.accountIdentifier(), request.getVersion()))
-        ))
-        .doOnNext(accountAndMaybeProfile -> {
-          if (!request.getPaymentAddress().isEmpty()) {
-            final boolean hasDisallowedPrefix =
-                dynamicConfigurationManager.getConfiguration().getPaymentsConfiguration().getDisallowedPrefixes().stream()
-                    .anyMatch(prefix -> accountAndMaybeProfile.getT1().getNumber().startsWith(prefix));
-            if (hasDisallowedPrefix && accountAndMaybeProfile.getT2().map(VersionedProfile::paymentAddress).isEmpty()) {
-              throw Status.PERMISSION_DENIED.asRuntimeException();
-            }
-          }
-        })
-        .flatMap(accountAndMaybeProfile -> {
-          final Account account = accountAndMaybeProfile.getT1();
-          final Optional<String> currentAvatar = accountAndMaybeProfile.getT2().map(VersionedProfile::avatar)
-              .filter(avatar -> avatar.startsWith("profiles/"));
-          final AvatarData avatarData = switch (AvatarChangeUtil.fromGrpcAvatarChange(request.getAvatarChange())) {
-            case AVATAR_CHANGE_UNCHANGED -> new AvatarData(currentAvatar, currentAvatar, Optional.empty());
-            case AVATAR_CHANGE_CLEAR -> new AvatarData(currentAvatar, Optional.empty(), Optional.empty());
-            case AVATAR_CHANGE_UPDATE -> {
-              final String updateAvatarObjectName = ProfileHelper.generateAvatarObjectName();
-              yield new AvatarData(currentAvatar, Optional.of(updateAvatarObjectName),
-                  Optional.of(generateAvatarUploadForm(updateAvatarObjectName)));
-            }
-          };
 
-          final Mono<Void> profileSetMono = Mono.fromFuture(() -> profilesManager.setAsync(account.getUuid(),
-              new VersionedProfile(
-                  request.getVersion(),
-                  request.getName().toByteArray(),
-                  avatarData.finalAvatar().orElse(null),
-                  request.getAboutEmoji().toByteArray(),
-                  request.getAbout().toByteArray(),
-                  request.getPaymentAddress().toByteArray(),
-                  request.getPhoneNumberSharing().toByteArray(),
-                  request.getCommitment().toByteArray())));
+    final byte[] expectedCurrentVersion = request.getExpectedCurrentVersion().toByteArray();
+    final boolean currentVersionMatchesExpected = Arrays.equals(account.getCurrentProfileVersion().orElse(new byte[0]), expectedCurrentVersion);
 
-          final List<Mono<?>> updates = new ArrayList<>(2);
-          final List<AccountBadge> updatedBadges = Optional.of(request.getBadgeIdsList())
-              .map(badges -> ProfileHelper.mergeBadgeIdsWithExistingAccountBadges(clock, badgeConfigurationMap, badges, account.getBadges()))
-              .orElseGet(account::getBadges);
+    if (!currentVersionMatchesExpected) {
+      final ExpectedVersionConflict conflict = account.getCurrentProfileVersion()
+          .map(v -> ExpectedVersionConflict.newBuilder().setCurrentProfileVersion(ByteString.copyFrom(v)).build())
+          .orElseGet(ExpectedVersionConflict::getDefaultInstance);
+      return SetProfileResponse.newBuilder().setExpectedVersionWriteConflict(conflict)
+          .build();
+    }
 
-          updates.add(Mono.fromFuture(() -> accountsManager.updateAsync(account, a -> {
-            a.setBadges(clock, updatedBadges);
-            a.setCurrentProfileVersion(request.getVersion());
-          })));
+    final byte[] version = request.getVersion().toByteArray();
+    final Optional<VersionedProfile> maybeProfile = profilesManager.get(authenticatedDevice.accountIdentifier(),
+        version);
+    final Optional<VersionedProfileV1> maybeV1Profile = profilesManager.getV1(
+        authenticatedDevice.accountIdentifier(), HexFormat.of().formatHex(version));
 
-          if (request.getAvatarChange() != AvatarChange.AVATAR_CHANGE_UNCHANGED && avatarData.currentAvatar().isPresent()) {
-            updates.add(Mono.fromFuture(() -> asyncS3client.deleteObject(DeleteObjectRequest.builder()
-                .bucket(bucket)
-                .key(avatarData.currentAvatar().get())
-                .build())));
-          }
-          return profileSetMono.thenMany(Flux.merge(updates)).then(Mono.just(avatarData));
-        })
-        .map(avatarData -> avatarData.uploadAttributes()
-            .map(avatarUploadAttributes -> SetProfileResponse.newBuilder().setAttributes(avatarUploadAttributes).build())
-            .orElse(SetProfileResponse.newBuilder().build())
-        );
+    if (!request.getPaymentAddress().isEmpty() &&
+        ProfileHelper.isPaymentAddressUpdateForbidden(account, maybeProfile, maybeV1Profile, RequestAttributesUtil.getRemoteAddress().getHostAddress(), asnInfoProviderSupplier.get(), dynamicConfigurationManager)) {
+
+      return SetProfileResponse.newBuilder()
+          .setPaymentsForbiddenInRegion(PaymentsForbiddenInRegion.getDefaultInstance())
+          .build();
+    }
+
+    final Optional<String> currentAvatar = maybeV1Profile.map(VersionedProfileV1::avatar)
+        .filter(avatar -> avatar.startsWith("profiles/"));
+
+    final AvatarData avatarData = switch (AvatarChangeUtil.fromGrpcAvatarChange(request.getV1Request().getAvatarChange())) {
+      case AVATAR_CHANGE_UNCHANGED -> new AvatarData(currentAvatar, currentAvatar, Optional.empty());
+      case AVATAR_CHANGE_CLEAR -> new AvatarData(currentAvatar, Optional.empty(), Optional.empty());
+      case AVATAR_CHANGE_UPDATE -> {
+        final String updateAvatarObjectName = ProfileHelper.generateAvatarObjectName();
+        yield new AvatarData(currentAvatar, Optional.of(updateAvatarObjectName),
+            Optional.of(ProfileGrpcHelper.generateAvatarUploadForm(updateAvatarObjectName, ProfileHelper.MAX_PROFILE_AVATAR_SIZE_BYTES, policyGenerator, clock)));
+      }
+    };
+
+    final byte[] commitment = !request.getCommitment().isEmpty()
+        ? request.getCommitment().toByteArray()
+        : maybeProfile.orElseThrow(IllegalStateException::new).commitment();
+
+    final VersionedProfileV1 v1Profile = new VersionedProfileV1(
+        HexFormat.of().formatHex(version),
+        request.getV1Request().getName().toByteArray(),
+        avatarData.finalAvatar().orElse(null),
+        request.getV1Request().getAboutEmoji().toByteArray(),
+        request.getV1Request().getAbout().toByteArray(),
+        request.getPaymentAddress().isEmpty() ? null : request.getPaymentAddress().toByteArray(),
+        request.getV1Request().getPhoneNumberSharing().toByteArray(),
+        commitment);
+
+    final VersionedProfile profile = new VersionedProfile(version,
+        request.getData().toByteArray(),
+        request.getPaymentAddress().isEmpty() ? null : request.getPaymentAddress().toByteArray(),
+        commitment
+    );
+
+    try {
+      profilesManager.set(account.getAccountIdentifier(), v1Profile, profile,
+          request.getExpectedCurrentDataHash().isEmpty() ? null : request.getExpectedCurrentDataHash().toByteArray());
+
+    } catch (WriteConflictException _) {
+      return SetProfileResponse.newBuilder()
+          .setExpectedDataWriteConflict(FailedPrecondition.newBuilder()
+              .setDescription("current and expected data hash mismatch")
+              .build())
+          .build();
+    }
+
+    try {
+      accountsManager.updateCurrentProfileVersion(account.getAccountIdentifier(), version, expectedCurrentVersion, a -> {
+
+        final List<AccountBadge> updatedBadges = Optional.of(request.getBadgeIdsList())
+            .map(badges -> ProfileHelper.mergeBadgeIdsWithExistingAccountBadges(clock, badgeConfigurationMap, badges,
+                a.getBadges()))
+            .orElseGet(a::getBadges);
+
+        a.setBadges(clock, updatedBadges);
+      });
+
+    } catch (final WriteConflictException e) {
+
+      final ExpectedVersionConflict conflict = e.getConflictedValue()
+          .map(v -> ExpectedVersionConflict.newBuilder().setCurrentProfileVersion(ByteString.copyFrom(v)).build())
+          .orElseGet(ExpectedVersionConflict::getDefaultInstance);
+
+      return SetProfileResponse.newBuilder().setExpectedVersionWriteConflict(conflict).build();
+    }
+
+    if (request.getV1Request().getAvatarChange() != AvatarChange.AVATAR_CHANGE_UNCHANGED && avatarData.currentAvatar().isPresent()) {
+      profilesManager.deleteAvatar(avatarData.currentAvatar().get());
+    }
+
+    return avatarData.uploadAttributes()
+        .map(avatarUploadAttributes -> SetProfileResponse.newBuilder()
+            .setResult(SetProfileResult.newBuilder()
+                .setV1AvatarUploadForm(avatarUploadAttributes).build())
+            .build())
+        .orElse(SetProfileResponse.newBuilder()
+            .setResult(SetProfileResult.getDefaultInstance())
+            .build());
   }
 
   @Override
-  public Mono<GetUnversionedProfileResponse> getUnversionedProfile(final GetUnversionedProfileRequest request) {
+  public GetAvatarCredentialResponse getAvatarCredential(final GetAvatarCredentialRequest request) {
+
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+
+    final Account account = accountsManager.getByAccountIdentifier(authenticatedDevice.accountIdentifier())
+        .orElseThrow(() -> GrpcExceptions.invalidCredentials("invalid credentials"));
+
+    if (account.getZkCredentialKey().isEmpty()) {
+      return GetAvatarCredentialResponse.newBuilder()
+          .setMissingZkCredentialKey(FailedPrecondition.newBuilder().setDescription("account requires ZK credential key"))
+          .build();
+    }
+
+    try {
+      final AvatarUploadCredentialRequest credentialRequest = new AvatarUploadCredentialRequest(
+          request.getAvatarCredentialRequest().toByteArray());
+
+      final AvatarUploadCredentialResponse credentialResponse = credentialRequest.issueCredential(
+          new ServiceId.Aci(account.getAccountIdentifier()),
+          account.getZkCredentialKey().get(),
+          Objects.requireNonNull(account.getZkCredentialKeyRotationId()),
+          clock.instant().truncatedTo(ChronoUnit.DAYS),
+          this.genericServerSecretParams);
+
+      return GetAvatarCredentialResponse.newBuilder()
+          .setAvatarCredential(ByteString.copyFrom(credentialResponse.serialize()))
+          .build();
+    } catch (InvalidInputException | VerificationFailedException _) {
+      throw GrpcExceptions.invalidArguments("invalid credential request");
+    }
+  }
+
+  @Override
+  public GetProfileResponse getProfile(final GetProfileRequest request) throws RateLimitExceededException {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
     final ServiceIdentifier targetIdentifier =
-        ServiceIdentifierUtil.fromGrpcServiceIdentifier(request.getServiceIdentifier());
-    return validateRateLimitAndGetAccount(authenticatedDevice.accountIdentifier(), targetIdentifier)
-        .map(targetAccount -> ProfileGrpcHelper.buildUnversionedProfileResponse(targetIdentifier,
-            authenticatedDevice.accountIdentifier(),
-            targetAccount,
-            profileBadgeConverter));
+        GrpcServiceIdentifierUtil.fromGrpcServiceIdentifier(request.getAccountIdentifier());
+    final byte[] version = request.getVersion().toByteArray();
+    final Optional<Account> maybeAccount =
+        validateRateLimitAndGetAccount(authenticatedDevice.accountIdentifier(), targetIdentifier);
+
+    return maybeAccount.flatMap(account -> ProfileGrpcHelper
+            .getProfile(account, profilesManager, profileBadgeConverter, version)
+
+            // If the etag matches, drop the result
+            .map(profileResult -> request.getEtag().equals(profileResult.getEtag())
+                ? GetProfileResponse.newBuilder().setEtagMatched(true).build()
+                : GetProfileResponse.newBuilder().setProfile(profileResult).build())
+
+            // If we didn't find a v2 profile, try a v1 profile
+            .or(() -> ProfileGrpcHelper
+                .getProfileV1(account, profilesManager, profileBadgeConverter, version)
+                .map(v1Result -> GetProfileResponse.newBuilder().setLegacyProfile(v1Result).build())))
+        .orElseGet(() -> GetProfileResponse.newBuilder().setNotFound(NotFound.getDefaultInstance()).build());
   }
 
   @Override
-  public Mono<GetVersionedProfileResponse> getVersionedProfile(final GetVersionedProfileRequest request) {
-    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
-    final ServiceIdentifier targetIdentifier =
-        ServiceIdentifierUtil.fromGrpcServiceIdentifier(request.getAccountIdentifier());
+  public SetV1AvatarResponse setV1Avatar(final SetV1AvatarRequest request) {
 
-    if (targetIdentifier.identityType() != IdentityType.ACI) {
-      throw Status.INVALID_ARGUMENT.withDescription("Expected ACI service identifier").asRuntimeException();
+    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
+
+    final String version = request.getVersion();
+    final Optional<VersionedProfileV1> maybeV1Profile = profilesManager.getV1(authenticatedDevice.accountIdentifier(),
+        version);
+
+    if (maybeV1Profile.isEmpty() && request.getCommitment().isEmpty()) {
+      throw GrpcExceptions.fieldViolation("commitment", "Commitment is required for new profile versions");
     }
 
-    return validateRateLimitAndGetAccount(authenticatedDevice.accountIdentifier(), targetIdentifier)
-        .flatMap(account -> ProfileGrpcHelper.getVersionedProfile(account, profilesManager, request.getVersion()));
+    maybeV1Profile.map(VersionedProfileV1::avatar).filter(a -> a.startsWith("profiles/"))
+        .ifPresent(profilesManager::deleteAvatar);
+
+    final byte[] commitment = maybeV1Profile.map(VersionedProfileV1::commitment).orElseGet(request.getCommitment()::toByteArray);
+
+    final String updateAvatarObjectName = ProfileHelper.generateAvatarObjectName();
+
+    profilesManager.setV1Avatar(authenticatedDevice.accountIdentifier(), version, updateAvatarObjectName, commitment);
+
+    return SetV1AvatarResponse.newBuilder()
+        .setForm(ProfileGrpcHelper.generateAvatarUploadForm(updateAvatarObjectName,
+            ProfileHelper.MAX_PROFILE_AVATAR_SIZE_BYTES,
+            policyGenerator, clock))
+        .build();
   }
 
-  @Override
-  public Mono<GetExpiringProfileKeyCredentialResponse> getExpiringProfileKeyCredential(
-      final GetExpiringProfileKeyCredentialRequest request) {
-    final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
-    final ServiceIdentifier targetIdentifier = ServiceIdentifierUtil.fromGrpcServiceIdentifier(request.getAccountIdentifier());
+  private Optional<Account> validateRateLimitAndGetAccount(final UUID requesterUuid,
+      final ServiceIdentifier targetIdentifier) throws RateLimitExceededException {
+    rateLimiters.getProfileLimiter().validate(requesterUuid);
 
-    if (targetIdentifier.identityType() != IdentityType.ACI) {
-      throw Status.INVALID_ARGUMENT.withDescription("Expected ACI service identifier").asRuntimeException();
-    }
-
-    if (request.getCredentialType() != CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY) {
-      throw Status.INVALID_ARGUMENT.withDescription("Expected expiring profile key credential type").asRuntimeException();
-    }
-
-    return validateRateLimitAndGetAccount(authenticatedDevice.accountIdentifier(), targetIdentifier)
-        .flatMap(targetAccount -> ProfileGrpcHelper.getExpiringProfileKeyCredentialResponse(targetAccount.getUuid(),
-              request.getVersion(), request.getCredentialRequest().toByteArray(), profilesManager, zkProfileOperations));
-  }
-
-
-  private Mono<Account> validateRateLimitAndGetAccount(final UUID requesterUuid,
-      final ServiceIdentifier targetIdentifier) {
-    return rateLimiters.getProfileLimiter().validateReactive(requesterUuid)
-        .then(Mono.fromFuture(() -> accountsManager.getByServiceIdentifierAsync(targetIdentifier))
-            .flatMap(Mono::justOrEmpty))
-        .switchIfEmpty(Mono.error(Status.NOT_FOUND.asException()));
+    return accountsManager.getByServiceIdentifier(targetIdentifier);
   }
 
   private void validateRequest(final SetProfileRequest request) {
-    if (request.getVersion().isEmpty()) {
-      throw Status.INVALID_ARGUMENT.withDescription("Missing version").asRuntimeException();
+    if (request.getExpectedCurrentDataHash().isEmpty() && request.getCommitment().isEmpty()) {
+      throw GrpcExceptions.invalidArguments("At least one of expected current data hash and commitment is required");
     }
 
+    // v1 -> v2 migration
     if (request.getCommitment().isEmpty()) {
-      throw Status.INVALID_ARGUMENT.withDescription("Missing profile commitment").asRuntimeException();
+      throw GrpcExceptions.invalidArguments("Request must include commitment during migration");
     }
-
-    checkByteStringLength(request.getName(), "Invalid name length", List.of(81, 285));
-    checkByteStringLength(request.getAboutEmoji(), "Invalid about emoji length", List.of(0, 60));
-    checkByteStringLength(request.getAbout(), "Invalid about length", List.of(0, 156, 282, 540));
-    checkByteStringLength(request.getPaymentAddress(), "Invalid mobile coin address length", List.of(0, 582));
-  }
-
-  private static void checkByteStringLength(final ByteString byteString, final String errorMessage, final List<Integer> allowedLengths) {
-    final int byteStringLength = byteString.toByteArray().length;
-
-    for (int allowedLength : allowedLengths) {
-      if (byteStringLength == allowedLength) {
-        return;
-      }
-    }
-
-    throw Status.INVALID_ARGUMENT.withDescription(errorMessage).asRuntimeException();
-  }
-
-  private ProfileAvatarUploadAttributes generateAvatarUploadForm(final String objectName) {
-    final ZonedDateTime now = ZonedDateTime.now(clock);
-    final Pair<String, String> policy = policyGenerator.createFor(now, objectName, ProfileHelper.MAX_PROFILE_AVATAR_SIZE_BYTES);
-    final String signature = policySigner.getSignature(now, policy.second());
-
-    return ProfileAvatarUploadAttributes.newBuilder()
-        .setPath(objectName)
-        .setCredential(policy.first())
-        .setAcl("private")
-        .setAlgorithm("AWS4-HMAC-SHA256")
-        .setDate(now.format(PostPolicyGenerator.AWS_DATE_TIME))
-        .setPolicy(policy.second())
-        .setSignature(ByteString.copyFrom(signature.getBytes()))
-        .build();
   }
 }

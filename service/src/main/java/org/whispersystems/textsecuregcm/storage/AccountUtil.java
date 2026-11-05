@@ -8,7 +8,7 @@ package org.whispersystems.textsecuregcm.storage;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 import java.io.IOException;
 
-class AccountUtil {
+public class AccountUtil {
 
   static Account cloneAccountAsNotStale(final Account account) {
     try {

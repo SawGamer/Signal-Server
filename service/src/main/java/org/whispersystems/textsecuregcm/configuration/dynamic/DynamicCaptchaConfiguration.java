@@ -7,15 +7,14 @@ package org.whispersystems.textsecuregcm.configuration.dynamic;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
-import org.whispersystems.textsecuregcm.captcha.Action;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import javax.validation.constraints.DecimalMax;
-import javax.validation.constraints.DecimalMin;
-import javax.validation.constraints.NotNull;
+import org.whispersystems.textsecuregcm.captcha.Action;
 
 public class DynamicCaptchaConfiguration {
 
@@ -29,19 +28,15 @@ public class DynamicCaptchaConfiguration {
   private boolean allowHCaptcha = false;
 
   @JsonProperty
-  private boolean allowRecaptcha = true;
-
-  @JsonProperty
   @NotNull
   private Map<Action, Set<String>> hCaptchaSiteKeys = Collections.emptyMap();
 
   @JsonProperty
   @NotNull
-  private Map<Action, Set<String>> recaptchaSiteKeys = Collections.emptyMap();
+  private Map<Action, BigDecimal> scoreFloorByAction = Collections.emptyMap();
 
   @JsonProperty
-  @NotNull
-  private Map<Action, BigDecimal> scoreFloorByAction = Collections.emptyMap();
+  private boolean failOpen = false;
 
   public BigDecimal getScoreFloor() {
     return scoreFloor;
@@ -49,10 +44,6 @@ public class DynamicCaptchaConfiguration {
 
   public boolean isAllowHCaptcha() {
     return allowHCaptcha;
-  }
-
-  public boolean isAllowRecaptcha() {
-    return allowRecaptcha;
   }
 
   public Map<Action, BigDecimal> getScoreFloorByAction() {
@@ -78,14 +69,11 @@ public class DynamicCaptchaConfiguration {
     this.hCaptchaSiteKeys = hCaptchaSiteKeys;
   }
 
-  public Map<Action, Set<String>> getRecaptchaSiteKeys() {
-    return recaptchaSiteKeys;
+  public boolean isFailOpen() {
+    return failOpen;
   }
 
-  @VisibleForTesting
-  public void setRecaptchaSiteKeys(final Map<Action, Set<String>> recaptchaSiteKeys) {
-    this.recaptchaSiteKeys = recaptchaSiteKeys;
+  public void setFailOpen(final boolean failOpen) {
+    this.failOpen = failOpen;
   }
-
-
 }

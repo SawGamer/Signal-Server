@@ -5,6 +5,11 @@
 
 package org.signal.integration.config;
 
-public record DynamoDbTables(String registrationRecovery,
-                             String verificationSessions) {
+import jakarta.validation.constraints.NotBlank;
+
+public record DynamoDbTables(@NotBlank String registrationRecovery,
+                             @NotBlank String verificationSessions,
+                             @NotBlank String phoneNumberIdentifiers,
+                             @NotBlank String changeNumberWaitingPeriods,
+                             @NotBlank String redeemedReceipts) {
 }

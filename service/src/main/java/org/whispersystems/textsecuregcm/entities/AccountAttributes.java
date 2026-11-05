@@ -4,39 +4,30 @@
  */
 package org.whispersystems.textsecuregcm.entities;
 
-import static org.whispersystems.textsecuregcm.util.RegistrationIdValidator.validRegistrationId;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
-import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.google.common.annotations.VisibleForTesting;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import java.util.Optional;
+import java.util.Set;
 import javax.annotation.Nullable;
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.Size;
+import org.apache.commons.lang3.ArrayUtils;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
 import org.whispersystems.textsecuregcm.util.ExactlySize;
 
 public class AccountAttributes {
 
-  @JsonProperty
-  private boolean fetchesMessages;
+  @JsonUnwrapped
+  @Valid
+  private DeviceAttributes deviceAttributes;
 
   @JsonProperty
-  private int registrationId;
-
-  @JsonProperty("pniRegistrationId")
-  private int phoneNumberIdentityRegistrationId;
-
-  @JsonProperty
-  @JsonSerialize(using = ByteArrayAdapter.Serializing.class)
-  @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
-  @Size(max = 225)
-  private byte[] name;
-
-  @JsonProperty
+  @ExactlySize({0, 64})
   private String registrationLock;
 
   @JsonProperty
@@ -47,14 +38,12 @@ public class AccountAttributes {
   private boolean unrestrictedUnidentifiedAccess;
 
   @JsonProperty
-  private DeviceCapabilities capabilities;
-
-  @JsonProperty
   private boolean discoverableByPhoneNumber = true;
 
   @JsonProperty
   @Nullable
   @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
+  @ExactlySize({0, 32})
   private byte[] recoveryPassword = null;
 
   public AccountAttributes() {
@@ -64,34 +53,33 @@ public class AccountAttributes {
   public AccountAttributes(
       final boolean fetchesMessages,
       final int registrationId,
-      final int phoneNumberIdentifierRegistrationId,
+      final Integer phoneNumberIdentifierRegistrationId,
       final byte[] name,
       final String registrationLock,
       final boolean discoverableByPhoneNumber,
-      final DeviceCapabilities capabilities) {
-    this.fetchesMessages = fetchesMessages;
-    this.registrationId = registrationId;
-    this.phoneNumberIdentityRegistrationId = phoneNumberIdentifierRegistrationId;
-    this.name = name;
+      final Set<DeviceCapability> capabilities,
+      @Nullable final byte[] recoveryPassword) {
+
+    this.deviceAttributes = new DeviceAttributes(fetchesMessages, registrationId, phoneNumberIdentifierRegistrationId, name, capabilities);
     this.registrationLock = registrationLock;
     this.discoverableByPhoneNumber = discoverableByPhoneNumber;
-    this.capabilities = capabilities;
+    this.recoveryPassword = recoveryPassword;
   }
 
   public boolean getFetchesMessages() {
-    return fetchesMessages;
+    return deviceAttributes.fetchesMessages();
   }
 
   public int getRegistrationId() {
-    return registrationId;
+    return deviceAttributes.registrationId();
   }
 
-  public int getPhoneNumberIdentityRegistrationId() {
-    return phoneNumberIdentityRegistrationId;
+  public Optional<Integer> getPhoneNumberIdentityRegistrationId() {
+    return Optional.ofNullable(deviceAttributes.phoneNumberIdentityRegistrationId());
   }
 
   public byte[] getName() {
-    return name;
+    return deviceAttributes.name();
   }
 
   public String getRegistrationLock() {
@@ -106,8 +94,9 @@ public class AccountAttributes {
     return unrestrictedUnidentifiedAccess;
   }
 
-  public DeviceCapabilities getCapabilities() {
-    return capabilities;
+  @Nullable
+  public Set<DeviceCapability> getCapabilities() {
+    return deviceAttributes.capabilities();
   }
 
   public boolean isDiscoverableByPhoneNumber() {
@@ -115,28 +104,42 @@ public class AccountAttributes {
   }
 
   public Optional<byte[]> recoveryPassword() {
-    return Optional.ofNullable(recoveryPassword);
+    return Optional.ofNullable(recoveryPassword).filter(ArrayUtils::isNotEmpty);
   }
 
   @VisibleForTesting
-  public AccountAttributes withUnidentifiedAccessKey(final byte[] unidentifiedAccessKey) {
+  public AccountAttributes setUnidentifiedAccessKey(final byte[] unidentifiedAccessKey) {
     this.unidentifiedAccessKey = unidentifiedAccessKey;
     return this;
   }
 
   @VisibleForTesting
-  public AccountAttributes withRecoveryPassword(final byte[] recoveryPassword) {
+  public AccountAttributes setRecoveryPassword(final byte[] recoveryPassword) {
     this.recoveryPassword = recoveryPassword;
     return this;
   }
 
   @VisibleForTesting
-  public void setPhoneNumberIdentityRegistrationId(final Integer phoneNumberIdentityRegistrationId) {
-    this.phoneNumberIdentityRegistrationId = phoneNumberIdentityRegistrationId;
+  public AccountAttributes setDeviceAttributes(final DeviceAttributes deviceAttributes) {
+    this.deviceAttributes = deviceAttributes;
+    return this;
+  }
+
+  @VisibleForTesting
+  public AccountAttributes setUnrestrictedUnidentifiedAccess(final boolean unrestrictedUnidentifiedAccess) {
+    this.unrestrictedUnidentifiedAccess = unrestrictedUnidentifiedAccess;
+    return this;
+  }
+
+  public AccountAttributes setDiscoverableByPhoneNumber(final boolean discoverableByPhoneNumber) {
+    this.discoverableByPhoneNumber = discoverableByPhoneNumber;
+    return this;
   }
 
   @AssertTrue
-  public boolean isEachRegistrationIdValid() {
-    return validRegistrationId(registrationId) && validRegistrationId(phoneNumberIdentityRegistrationId);
+  @Schema(hidden = true)
+  public boolean isUnrestrictedUakValid() {
+
+    return unrestrictedUnidentifiedAccess || (unidentifiedAccessKey != null && unidentifiedAccessKey.length == 16);
   }
 }

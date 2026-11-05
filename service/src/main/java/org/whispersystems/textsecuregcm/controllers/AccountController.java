@@ -7,37 +7,41 @@ package org.whispersystems.textsecuregcm.controllers;
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HEAD;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.Response.Status;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.HEAD;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
+import org.apache.commons.lang3.StringUtils;
+import org.glassfish.jersey.server.ManagedAsync;
 import org.signal.libsignal.usernames.BaseUsernameException;
-import org.whispersystems.textsecuregcm.auth.AccountAndAuthenticatedDeviceHolder;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
-import org.whispersystems.textsecuregcm.auth.ChangesDeviceEnabledState;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
-import org.whispersystems.textsecuregcm.auth.TurnToken;
-import org.whispersystems.textsecuregcm.auth.TurnTokenGenerator;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.entities.AccountIdentifierResponse;
 import org.whispersystems.textsecuregcm.entities.AccountIdentityResponse;
@@ -58,13 +62,13 @@ import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.RegistrationRecoveryPasswordsManager;
+import org.whispersystems.textsecuregcm.storage.PhoneNumberRecoveryPasswordsManager;
 import org.whispersystems.textsecuregcm.storage.UsernameHashNotAvailableException;
 import org.whispersystems.textsecuregcm.storage.UsernameReservationNotFoundException;
-import org.whispersystems.textsecuregcm.util.ExceptionUtils;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.UsernameHashZkProofVerifier;
 import org.whispersystems.textsecuregcm.util.Util;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 
 @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 @Path("/v1/accounts")
@@ -76,62 +80,49 @@ public class AccountController {
 
   private final AccountsManager accounts;
   private final RateLimiters rateLimiters;
-  private final TurnTokenGenerator turnTokenGenerator;
-  private final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager;
+  private final PhoneNumberRecoveryPasswordsManager phoneNumberRecoveryPasswordsManager;
   private final UsernameHashZkProofVerifier usernameHashZkProofVerifier;
 
   public AccountController(
       AccountsManager accounts,
       RateLimiters rateLimiters,
-      TurnTokenGenerator turnTokenGenerator,
-      RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager,
+      PhoneNumberRecoveryPasswordsManager phoneNumberRecoveryPasswordsManager,
       UsernameHashZkProofVerifier usernameHashZkProofVerifier) {
     this.accounts = accounts;
     this.rateLimiters = rateLimiters;
-    this.turnTokenGenerator = turnTokenGenerator;
-    this.registrationRecoveryPasswordsManager = registrationRecoveryPasswordsManager;
+    this.phoneNumberRecoveryPasswordsManager = phoneNumberRecoveryPasswordsManager;
     this.usernameHashZkProofVerifier = usernameHashZkProofVerifier;
-  }
-
-  @GET
-  @Path("/turn/")
-  @Produces(MediaType.APPLICATION_JSON)
-  public TurnToken getTurnToken(@Auth AuthenticatedAccount auth) throws RateLimitExceededException {
-    rateLimiters.getTurnLimiter().validate(auth.getAccount().getUuid());
-    return turnTokenGenerator.generate(auth.getAccount().getUuid());
   }
 
   @PUT
   @Path("/gcm/")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  @ChangesDeviceEnabledState
-  public void setGcmRegistrationId(@Auth AuthenticatedAccount auth,
+  @ManagedAsync
+  public void setGcmRegistrationId(@Auth AuthenticatedDevice auth,
       @NotNull @Valid GcmRegistrationId registrationId) {
 
-    final Account account = auth.getAccount();
-    final Device device = auth.getAuthenticatedDevice();
+    final String currentGcmId = accounts.getByAccountIdentifier(auth.accountIdentifier())
+        .flatMap(account -> account.getDevice(auth.deviceId()))
+        .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED))
+        .getGcmId();
 
-    if (Objects.equals(device.getGcmId(), registrationId.gcmRegistrationId())) {
+    if (Objects.equals(currentGcmId, registrationId.gcmRegistrationId())) {
       return;
     }
 
-    accounts.updateDevice(account, device.getId(), d -> {
-      d.setApnId(null);
-      d.setVoipApnId(null);
-      d.setGcmId(registrationId.gcmRegistrationId());
-      d.setFetchesMessages(false);
+    accounts.updateDevice(auth.accountIdentifier(), auth.deviceId(), device -> {
+      device.setApnId(null);
+      device.setGcmId(registrationId.gcmRegistrationId());
+      device.setFetchesMessages(false);
     });
   }
 
   @DELETE
   @Path("/gcm/")
-  @ChangesDeviceEnabledState
-  public void deleteGcmRegistrationId(@Auth AuthenticatedAccount auth) {
-    Account account = auth.getAccount();
-    Device device = auth.getAuthenticatedDevice();
-
-    accounts.updateDevice(account, device.getId(), d -> {
+  @ManagedAsync
+  public void deleteGcmRegistrationId(@Auth AuthenticatedDevice auth) {
+    accounts.updateDevice(auth.accountIdentifier(), auth.deviceId(), d -> {
       d.setGcmId(null);
       d.setFetchesMessages(false);
       d.setUserAgent("OWA");
@@ -142,22 +133,14 @@ public class AccountController {
   @Path("/apn/")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  @ChangesDeviceEnabledState
-  public void setApnRegistrationId(@Auth AuthenticatedAccount auth,
+  @ManagedAsync
+  public void setApnRegistrationId(@Auth AuthenticatedDevice auth,
       @NotNull @Valid ApnRegistrationId registrationId) {
 
-    final Account account = auth.getAccount();
-    final Device device = auth.getAuthenticatedDevice();
-
-    if (Objects.equals(device.getApnId(), registrationId.apnRegistrationId()) &&
-        Objects.equals(device.getVoipApnId(), registrationId.voipRegistrationId())) {
-
-      return;
-    }
-
-    accounts.updateDevice(account, device.getId(), d -> {
+    // Unlike FCM tokens, we need current "last updated" timestamps for APNs tokens and so update device records
+    // unconditionally
+    accounts.updateDevice(auth.accountIdentifier(), auth.deviceId(), d -> {
       d.setApnId(registrationId.apnRegistrationId());
-      d.setVoipApnId(registrationId.voipRegistrationId());
       d.setGcmId(null);
       d.setFetchesMessages(false);
     });
@@ -165,100 +148,133 @@ public class AccountController {
 
   @DELETE
   @Path("/apn/")
-  @ChangesDeviceEnabledState
-  public void deleteApnRegistrationId(@Auth AuthenticatedAccount auth) {
-    Account account = auth.getAccount();
-    Device device = auth.getAuthenticatedDevice();
-
-    accounts.updateDevice(account, device.getId(), d -> {
+  @ManagedAsync
+  public void deleteApnRegistrationId(@Auth AuthenticatedDevice auth) {
+    accounts.updateDevice(auth.accountIdentifier(), auth.deviceId(), d -> {
       d.setApnId(null);
-      d.setVoipApnId(null);
       d.setFetchesMessages(false);
-      if (d.getId() == 1) {
-        d.setUserAgent("OWI");
-      } else {
-        d.setUserAgent("OWP");
-      }
+      d.setUserAgent(d.isPrimary() ? "OWI" : "OWP");
     });
   }
 
   @PUT
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/registration_lock")
-  public void setRegistrationLock(@Auth AuthenticatedAccount auth, @NotNull @Valid RegistrationLock accountLock) {
-    SaltedTokenHash credentials = SaltedTokenHash.generateFor(accountLock.getRegistrationLock());
+  @ManagedAsync
+  public void setRegistrationLock(@Auth AuthenticatedDevice auth, @NotNull @Valid RegistrationLock accountLock) {
+    final SaltedTokenHash credentials = SaltedTokenHash.generateFor(accountLock.registrationLock());
 
-    accounts.update(auth.getAccount(),
-        a -> a.setRegistrationLock(credentials.hash(), credentials.salt()));
+    try {
+      accounts.update(auth.accountIdentifier(),
+          a -> a.setRegistrationLock(credentials.hash(), credentials.salt()));
+    } catch (IllegalArgumentException _) {
+      throw new BadRequestException();
+    }
   }
 
   @DELETE
   @Path("/registration_lock")
-  public void removeRegistrationLock(@Auth AuthenticatedAccount auth) {
-    accounts.update(auth.getAccount(), a -> a.setRegistrationLock(null, null));
+  @ManagedAsync
+  public void removeRegistrationLock(@Auth AuthenticatedDevice auth) {
+    accounts.update(auth.accountIdentifier(), a -> a.setRegistrationLock(null, null));
   }
 
   @PUT
   @Path("/name/")
-  public void setName(@Auth AuthenticatedAccount auth, @NotNull @Valid DeviceName deviceName) {
-    Account account = auth.getAccount();
-    Device device = auth.getAuthenticatedDevice();
-    accounts.updateDevice(account, device.getId(), d -> d.setName(deviceName.getDeviceName()));
+  @Operation(summary = "Set a device's encrypted name",
+  description = """
+      Sets the encrypted name for the specified device. Primary devices may change the name of any device associated
+      with their account, but linked devices may only change their own name. If no device ID is specified, then the
+      authenticated device's ID will be used.
+      """)
+  @ApiResponse(responseCode = "204", description = "Device name changed successfully")
+  @ApiResponse(responseCode = "404", description = "No device found with the given ID")
+  @ApiResponse(responseCode = "403", description = "Not authorized to change the name of the device with the given ID")
+  @ManagedAsync
+  public void setName(@Auth final AuthenticatedDevice auth,
+      @NotNull @Valid final DeviceName deviceName,
+
+      @Nullable
+      @QueryParam("deviceId")
+      @Schema(description = "The ID of the device for which to set a name; if omitted, the authenticated device will be targeted for a name change",
+          requiredMode = Schema.RequiredMode.NOT_REQUIRED)
+      final Byte deviceId) {
+
+    final Account account = accounts.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED));
+
+    final byte targetDeviceId = deviceId == null ? auth.deviceId() : deviceId;
+
+    if (account.getDevice(targetDeviceId).isEmpty()) {
+      throw new NotFoundException();
+    }
+
+    final boolean mayChangeName = auth.deviceId() == Device.PRIMARY_ID || auth.deviceId() == targetDeviceId;
+
+    if (!mayChangeName) {
+      throw new ForbiddenException();
+    }
+
+    accounts.updateDevice(account.getAccountIdentifier(), targetDeviceId, d -> d.setName(deviceName.deviceName()));
   }
 
   @PUT
   @Path("/attributes/")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  @ChangesDeviceEnabledState
+  @ManagedAsync
   public void setAccountAttributes(
-      @Auth AuthenticatedAccount auth,
-      @HeaderParam(HeaderUtils.X_SIGNAL_AGENT) String userAgent,
+      @Auth AuthenticatedDevice auth,
+      @HeaderParam(HeaderUtils.X_SIGNAL_AGENT) String signalAgent,
       @NotNull @Valid AccountAttributes attributes) {
-    final Account account = auth.getAccount();
-    final byte deviceId = auth.getAuthenticatedDevice().getId();
 
-    final Account updatedAccount = accounts.update(account, a -> {
-      a.getDevice(deviceId).ifPresent(d -> {
+    final Account account = accounts.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED));
+
+    final Collection<TransactWriteItem> additionalWriteItems =
+        account.getPhoneNumberIdentifier()
+            .flatMap(phoneNumberIdentifier -> attributes.recoveryPassword().map(recoveryPassword ->
+                List.of(phoneNumberRecoveryPasswordsManager.buildTransactWriteItemForStorePassword(phoneNumberIdentifier, recoveryPassword))))
+            .orElseGet(Collections::emptyList);
+
+    accounts.update(auth.accountIdentifier(), a -> {
+      a.getDevice(auth.deviceId()).ifPresent(d -> {
         d.setFetchesMessages(attributes.getFetchesMessages());
         d.setName(attributes.getName());
         d.setLastSeen(Util.todayInMillis());
         d.setCapabilities(attributes.getCapabilities());
-        d.setUserAgent(userAgent);
+        if (StringUtils.isNotBlank(signalAgent)) {
+          d.setUserAgent(signalAgent);
+        }
       });
+
+      if (StringUtils.isNotEmpty(attributes.getRegistrationLock()) && a.getNumber().isEmpty()) {
+        throw new BadRequestException("account does not have a phone number");
+      }
 
       a.setRegistrationLockFromAttributes(attributes);
       a.setUnidentifiedAccessKey(attributes.getUnidentifiedAccessKey());
       a.setUnrestrictedUnidentifiedAccess(attributes.isUnrestrictedUnidentifiedAccess());
+
+      if (attributes.isDiscoverableByPhoneNumber() && a.getNumber().isEmpty()) {
+        throw new BadRequestException("account does not have a phone number");
+      }
+
       a.setDiscoverableByPhoneNumber(attributes.isDiscoverableByPhoneNumber());
-    });
 
-    // if registration recovery password was sent to us, store it (or refresh its expiration)
-    attributes.recoveryPassword().ifPresent(registrationRecoveryPassword ->
-        registrationRecoveryPasswordsManager.storeForCurrentNumber(updatedAccount.getNumber(), registrationRecoveryPassword));
-  }
-
-  @GET
-  @Path("/me")
-  @Deprecated() // use whoami
-  @Produces(MediaType.APPLICATION_JSON)
-  public AccountIdentityResponse getMe(@Auth AuthenticatedAccount auth) {
-    return buildAccountIdentityResponse(auth);
+      attributes.recoveryPassword().ifPresent(a::setAccountRecoveryPassword);
+    }, additionalWriteItems);
   }
 
   @GET
   @Path("/whoami")
   @Produces(MediaType.APPLICATION_JSON)
-  public AccountIdentityResponse whoAmI(@Auth AuthenticatedAccount auth) {
-    return buildAccountIdentityResponse(auth);
-  }
+  @ManagedAsync
+  public AccountIdentityResponse whoAmI(@Auth final AuthenticatedDevice auth) {
+    final Account account = accounts.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED));
 
-  private AccountIdentityResponse buildAccountIdentityResponse(AccountAndAuthenticatedDeviceHolder auth) {
-    return new AccountIdentityResponse(auth.getAccount().getUuid(),
-        auth.getAccount().getNumber(),
-        auth.getAccount().getPhoneNumberIdentifier(),
-        auth.getAccount().getUsernameHash().filter(h -> h.length > 0).orElse(null),
-        auth.getAccount().isStorageSupported());
+    return AccountIdentityResponseBuilder.fromAccount(account);
   }
 
   @DELETE
@@ -272,9 +288,9 @@ public class AccountController {
   )
   @ApiResponse(responseCode = "204", description = "Username successfully deleted.", useReturnTypeSchema = true)
   @ApiResponse(responseCode = "401", description = "Account authentication check failed.")
-  public CompletableFuture<Response> deleteUsernameHash(@Auth final AuthenticatedAccount auth) {
-    return accounts.clearUsernameHash(auth.getAccount())
-        .thenApply(Util.ASYNC_EMPTY_RESPONSE);
+  @ManagedAsync
+  public void deleteUsernameHash(@Auth final AuthenticatedDevice auth) {
+    accounts.clearUsernameHash(auth.accountIdentifier());
   }
 
   @PUT
@@ -293,11 +309,12 @@ public class AccountController {
   @ApiResponse(responseCode = "409", description = "All username hashes from the list are taken.")
   @ApiResponse(responseCode = "422", description = "Invalid request format.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
-  public CompletableFuture<ReserveUsernameHashResponse> reserveUsernameHash(
-      @Auth final AuthenticatedAccount auth,
+  @ManagedAsync
+  public ReserveUsernameHashResponse reserveUsernameHash(
+      @Auth final AuthenticatedDevice auth,
       @NotNull @Valid final ReserveUsernameHashRequest usernameRequest) throws RateLimitExceededException {
 
-    rateLimiters.getUsernameReserveLimiter().validate(auth.getAccount().getUuid());
+    rateLimiters.getUsernameReserveLimiter().validate(auth.accountIdentifier());
 
     for (final byte[] hash : usernameRequest.usernameHashes()) {
       if (hash.length != USERNAME_HASH_LENGTH) {
@@ -305,15 +322,14 @@ public class AccountController {
       }
     }
 
-    return accounts.reserveUsernameHash(auth.getAccount(), usernameRequest.usernameHashes())
-        .thenApply(reservation -> new ReserveUsernameHashResponse(reservation.reservedUsernameHash()))
-        .exceptionally(throwable -> {
-          if (ExceptionUtils.unwrap(throwable) instanceof UsernameHashNotAvailableException) {
-            throw new WebApplicationException(Status.CONFLICT);
-          }
+    try {
+      final AccountsManager.UsernameReservation reservation =
+          accounts.reserveUsernameHash(auth.accountIdentifier(), usernameRequest.usernameHashes());
 
-          throw ExceptionUtils.wrap(throwable);
-        });
+      return new ReserveUsernameHashResponse(reservation.reservedUsernameHash());
+    } catch (final UsernameHashNotAvailableException e) {
+      throw new WebApplicationException(Status.CONFLICT);
+    }
   }
 
   @PUT
@@ -333,9 +349,10 @@ public class AccountController {
   @ApiResponse(responseCode = "410", description = "Username hash not available (username can't be used).")
   @ApiResponse(responseCode = "422", description = "Invalid request format.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
-  public CompletableFuture<UsernameHashResponse> confirmUsernameHash(
-      @Auth final AuthenticatedAccount auth,
-      @NotNull @Valid final ConfirmUsernameHashRequest confirmRequest) {
+  @ManagedAsync
+  public UsernameHashResponse confirmUsernameHash(
+      @Auth final AuthenticatedDevice auth,
+      @NotNull @Valid final ConfirmUsernameHashRequest confirmRequest) throws RateLimitExceededException {
 
     try {
       usernameHashZkProofVerifier.verifyProof(confirmRequest.zkProof(), confirmRequest.usernameHash());
@@ -343,26 +360,22 @@ public class AccountController {
       throw new WebApplicationException(Response.status(422).build());
     }
 
-    return rateLimiters.getUsernameSetLimiter().validateAsync(auth.getAccount().getUuid())
-        .thenCompose(ignored -> accounts.confirmReservedUsernameHash(
-            auth.getAccount(),
-            confirmRequest.usernameHash(),
-            confirmRequest.encryptedUsername()))
-        .thenApply(updatedAccount -> new UsernameHashResponse(updatedAccount.getUsernameHash()
-            .orElseThrow(() -> new IllegalStateException("Could not get username after setting")),
-            updatedAccount.getUsernameLinkHandle()))
-        .exceptionally(throwable -> {
-          if (ExceptionUtils.unwrap(throwable) instanceof UsernameReservationNotFoundException) {
-            throw new WebApplicationException(Status.CONFLICT);
-          }
+    rateLimiters.getUsernameSetLimiter().validate(auth.accountIdentifier());
 
-          if (ExceptionUtils.unwrap(throwable) instanceof UsernameHashNotAvailableException) {
-            throw new WebApplicationException(Status.GONE);
-          }
+    try {
+      final Account updatedAccount = accounts.confirmReservedUsernameHash(
+          auth.accountIdentifier(),
+          confirmRequest.usernameHash(),
+          confirmRequest.encryptedUsername());
 
-          throw ExceptionUtils.wrap(throwable);
-        })
-        .toCompletableFuture();
+      return new UsernameHashResponse(updatedAccount.getUsernameHash()
+          .orElseThrow(() -> new IllegalStateException("Could not get username after setting")),
+          updatedAccount.getUsernameLinkHandle());
+    } catch (final UsernameReservationNotFoundException e) {
+      throw new WebApplicationException(Status.CONFLICT);
+    } catch (UsernameHashNotAvailableException e) {
+      throw new WebApplicationException(Status.GONE);
+    }
   }
 
   @GET
@@ -379,7 +392,7 @@ public class AccountController {
   @ApiResponse(responseCode = "400", description = "Request must not be authenticated.")
   @ApiResponse(responseCode = "404", description = "Account not found for the given username.")
   public CompletableFuture<AccountIdentifierResponse> lookupUsernameHash(
-      @Auth final Optional<AuthenticatedAccount> maybeAuthenticatedAccount,
+      @Auth final Optional<AuthenticatedDevice> maybeAuthenticatedAccount,
       @PathParam("usernameHash") final String usernameHash) {
 
     requireNotAuthenticated(maybeAuthenticatedAccount);
@@ -394,7 +407,7 @@ public class AccountController {
       throw new WebApplicationException(Response.status(422).build());
     }
 
-    return accounts.getByUsernameHash(hash).thenApply(maybeAccount -> maybeAccount.map(Account::getUuid)
+    return accounts.getByUsernameHash(hash).thenApply(maybeAccount -> maybeAccount.map(Account::getAccountIdentifier)
         .map(AciServiceIdentifier::new)
         .map(AccountIdentifierResponse::new)
         .orElseThrow(() -> new WebApplicationException(Status.NOT_FOUND)));
@@ -417,13 +430,16 @@ public class AccountController {
   @ApiResponse(responseCode = "409", description = "Username is not set for the account.")
   @ApiResponse(responseCode = "422", description = "Invalid request format.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
+  @ManagedAsync
   public UsernameLinkHandle updateUsernameLink(
-      @Auth final AuthenticatedAccount auth,
+      @Auth final AuthenticatedDevice auth,
       @NotNull @Valid final EncryptedUsername encryptedUsername) throws RateLimitExceededException {
-    // check ratelimiter for username link operations
-    rateLimiters.forDescriptor(RateLimiters.For.USERNAME_LINK_OPERATION).validate(auth.getAccount().getUuid());
 
-    final Account account = auth.getAccount();
+    // check ratelimiter for username link operations
+    rateLimiters.forDescriptor(RateLimiters.For.USERNAME_LINK_OPERATION).validate(auth.accountIdentifier());
+
+    final Account account = accounts.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Status.UNAUTHORIZED));
 
     // check if username hash is set for the account
     if (account.getUsernameHash().isEmpty()) {
@@ -436,7 +452,7 @@ public class AccountController {
     } else {
       usernameLinkHandle = UUID.randomUUID();
     }
-    updateUsernameLink(auth.getAccount(), usernameLinkHandle, encryptedUsername.usernameLinkEncryptedValue());
+    updateUsernameLink(account.getAccountIdentifier(), usernameLinkHandle, encryptedUsername.usernameLinkEncryptedValue());
     return new UsernameLinkHandle(usernameLinkHandle);
   }
 
@@ -452,10 +468,12 @@ public class AccountController {
   @ApiResponse(responseCode = "204", description = "Username Link successfully deleted.", useReturnTypeSchema = true)
   @ApiResponse(responseCode = "401", description = "Account authentication check failed.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
-  public void deleteUsernameLink(@Auth final AuthenticatedAccount auth) throws RateLimitExceededException {
+  @ManagedAsync
+  public void deleteUsernameLink(@Auth final AuthenticatedDevice auth) throws RateLimitExceededException {
     // check ratelimiter for username link operations
-    rateLimiters.forDescriptor(RateLimiters.For.USERNAME_LINK_OPERATION).validate(auth.getAccount().getUuid());
-    clearUsernameLink(auth.getAccount());
+    rateLimiters.forDescriptor(RateLimiters.For.USERNAME_LINK_OPERATION).validate(auth.accountIdentifier());
+
+    clearUsernameLink(auth.accountIdentifier());
   }
 
   @GET
@@ -475,7 +493,7 @@ public class AccountController {
   @ApiResponse(responseCode = "422", description = "Invalid request format.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
   public CompletableFuture<EncryptedUsername> lookupUsernameLink(
-      @Auth final Optional<AuthenticatedAccount> maybeAuthenticatedAccount,
+      @Auth final Optional<AuthenticatedDevice> maybeAuthenticatedAccount,
       @PathParam("uuid") final UUID usernameLinkHandle) {
 
     requireNotAuthenticated(maybeAuthenticatedAccount);
@@ -500,8 +518,9 @@ public class AccountController {
   @HEAD
   @Path("/account/{identifier}")
   @RateLimitedByIp(RateLimiters.For.CHECK_ACCOUNT_EXISTENCE)
+  @ManagedAsync
   public Response accountExists(
-      @Auth final Optional<AuthenticatedAccount> authenticatedAccount,
+      @Auth final Optional<AuthenticatedDevice> authenticatedAccount,
 
       @Parameter(description = "An ACI or PNI account identifier to check")
       @PathParam("identifier") final ServiceIdentifier accountIdentifier) {
@@ -516,25 +535,26 @@ public class AccountController {
 
   @DELETE
   @Path("/me")
-  public CompletableFuture<Response> deleteAccount(@Auth AuthenticatedAccount auth) {
-    return accounts.delete(auth.getAccount(), AccountsManager.DeletionReason.USER_REQUEST).thenApply(Util.ASYNC_EMPTY_RESPONSE);
+  @ManagedAsync
+  public void deleteAccount(@Auth AuthenticatedDevice auth) {
+    accounts.delete(auth.accountIdentifier(), AccountsManager.DeletionReason.USER_REQUEST);
   }
 
-  private void clearUsernameLink(final Account account) {
-    updateUsernameLink(account, null, null);
+  private void clearUsernameLink(final UUID accountIdentifier) {
+    updateUsernameLink(accountIdentifier, null, null);
   }
 
   private void updateUsernameLink(
-      final Account account,
+      final UUID accountIdentifier,
       @Nullable final UUID usernameLinkHandle,
       @Nullable final byte[] encryptedUsername) {
     if ((encryptedUsername == null) ^ (usernameLinkHandle == null)) {
       throw new IllegalStateException("Both or neither arguments must be null");
     }
-    accounts.update(account, a -> a.setUsernameLinkDetails(usernameLinkHandle, encryptedUsername));
+    accounts.update(accountIdentifier, a -> a.setUsernameLinkDetails(usernameLinkHandle, encryptedUsername));
   }
 
-  private void requireNotAuthenticated(final Optional<AuthenticatedAccount> authenticatedAccount) {
+  private void requireNotAuthenticated(final Optional<AuthenticatedDevice> authenticatedAccount) {
     if (authenticatedAccount.isPresent()) {
       throw new BadRequestException("Operation requires unauthenticated access");
     }

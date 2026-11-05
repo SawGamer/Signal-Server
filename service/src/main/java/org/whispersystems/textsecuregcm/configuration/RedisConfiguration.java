@@ -6,13 +6,17 @@ package org.whispersystems.textsecuregcm.configuration;
 
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonTypeName;
+import com.google.common.annotations.VisibleForTesting;
+import io.lettuce.core.resource.ClientResources;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
-import java.util.List;
-import javax.validation.Valid;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
+import javax.annotation.Nullable;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 
-public class RedisConfiguration {
+@JsonTypeName("default")
+public class RedisConfiguration implements FaultTolerantRedisClientFactory {
 
   @JsonProperty
   @NotEmpty
@@ -20,22 +24,31 @@ public class RedisConfiguration {
 
   @JsonProperty
   @NotNull
-  private Duration timeout = Duration.ofSeconds(10);
+  private Duration timeout = Duration.ofSeconds(1);
 
   @JsonProperty
-  @NotNull
-  @Valid
-  private CircuitBreakerConfiguration circuitBreaker = new CircuitBreakerConfiguration();
+  @Nullable
+  private String circuitBreakerConfigurationName;
 
   public String getUri() {
     return uri;
+  }
+
+  @VisibleForTesting
+  public void setUri(String uri) {
+    this.uri = uri;
   }
 
   public Duration getTimeout() {
     return timeout;
   }
 
-  public CircuitBreakerConfiguration getCircuitBreakerConfiguration() {
-    return circuitBreaker;
+  @Nullable public String getCircuitBreakerConfigurationName() {
+    return circuitBreakerConfigurationName;
+  }
+
+  @Override
+  public FaultTolerantRedisClient build(final String name, final ClientResources clientResources) {
+    return new FaultTolerantRedisClient(name, this, clientResources.mutate());
   }
 }

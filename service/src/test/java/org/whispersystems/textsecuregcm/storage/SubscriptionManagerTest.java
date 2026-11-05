@@ -1,263 +1,108 @@
 /*
- * Copyright 2021 Signal Messenger, LLC
+ * Copyright 2026 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 package org.whispersystems.textsecuregcm.storage;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.whispersystems.textsecuregcm.storage.SubscriptionManager.GetResult.Type.FOUND;
-import static org.whispersystems.textsecuregcm.storage.SubscriptionManager.GetResult.Type.NOT_STORED;
-import static org.whispersystems.textsecuregcm.storage.SubscriptionManager.GetResult.Type.PASSWORD_MISMATCH;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-import java.security.SecureRandom;
-import java.time.Duration;
 import java.time.Instant;
-import java.util.Base64;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.function.Consumer;
-import javax.annotation.Nonnull;
-import javax.ws.rs.ClientErrorException;
-import org.assertj.core.api.Condition;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
-import org.whispersystems.textsecuregcm.storage.SubscriptionManager.GetResult;
-import org.whispersystems.textsecuregcm.storage.SubscriptionManager.Record;
-import org.whispersystems.textsecuregcm.subscriptions.ProcessorCustomer;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionProcessor;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.signal.libsignal.zkgroup.receipts.ServerZkReceiptOperations;
+import org.whispersystems.textsecuregcm.purchases.PaymentProvider;
+import org.whispersystems.textsecuregcm.purchases.SubscriberIdCreationNotPermittedException;
+import org.whispersystems.textsecuregcm.purchases.PurchaseForbiddenException;
+import org.whispersystems.textsecuregcm.purchases.SubscriptionPaymentProcessor;
 import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 
 class SubscriptionManagerTest {
 
-  private static final long NOW_EPOCH_SECONDS = 1_500_000_000L;
-  private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(3);
-  private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-
-  @RegisterExtension
-  static final DynamoDbExtension DYNAMO_DB_EXTENSION = new DynamoDbExtension(Tables.SUBSCRIPTIONS);
-
-  byte[] user;
-  byte[] password;
-  String customer;
-  Instant created;
-  SubscriptionManager subscriptionManager;
+  private static final Subscriptions SUBSCRIPTIONS = mock(Subscriptions.class);
+  private SubscriptionManager subscriptionManager;
 
   @BeforeEach
-  void beforeEach() {
-    user = TestRandomUtil.nextBytes(16);
-    password = TestRandomUtil.nextBytes(16);
-    customer = Base64.getEncoder().encodeToString(TestRandomUtil.nextBytes(16));
-    created = Instant.ofEpochSecond(NOW_EPOCH_SECONDS);
-    subscriptionManager = new SubscriptionManager(
-        Tables.SUBSCRIPTIONS.tableName(), DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient());
+  void setUp() {
+    reset(SUBSCRIPTIONS);
+
+    final SubscriptionPaymentProcessor testProcessor = mock(SubscriptionPaymentProcessor.class);
+    when(testProcessor.getProvider()).thenReturn(PaymentProvider.STRIPE);
+
+    subscriptionManager = new SubscriptionManager(SUBSCRIPTIONS, List.of(testProcessor), mock(ServerZkReceiptOperations.class), mock(
+        IssuedReceiptsManager.class));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void updateSubscriberCreate(final boolean createPermitted) {
+    final byte[] user = TestRandomUtil.nextBytes(16);
+    final SubscriberCredentials credentials = new SubscriberCredentials(TestRandomUtil.nextBytes(32),
+        user,
+        TestRandomUtil.nextBytes(16),
+        TestRandomUtil.nextBytes(16),
+        Instant.now());
+
+    when(SUBSCRIPTIONS.get(any(byte[].class), any(byte[].class))).thenReturn(Subscriptions.GetResult.NOT_STORED);
+    when(SUBSCRIPTIONS.create(any(byte[].class), any(byte[].class), any(Instant.class)))
+        .thenReturn(mock(Subscriptions.Record.class));
+
+    if (createPermitted) {
+      assertDoesNotThrow(() -> subscriptionManager.updateSubscriber(credentials, createPermitted));
+      verify(SUBSCRIPTIONS).create(aryEq(user), any(byte[].class), any(Instant.class));
+    } else {
+      assertThrows(SubscriberIdCreationNotPermittedException.class,
+          () -> subscriptionManager.updateSubscriber(credentials, createPermitted));
+      verify(SUBSCRIPTIONS, never()).create(any(byte[].class), any(byte[].class), any(Instant.class));
+    }
+
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void updateSubscriberExists(final boolean createPermitted) {
+    final byte[] user = TestRandomUtil.nextBytes(16);
+    final SubscriberCredentials credentials = new SubscriberCredentials(TestRandomUtil.nextBytes(32),
+        user,
+        TestRandomUtil.nextBytes(16),
+        TestRandomUtil.nextBytes(16),
+        Instant.now());
+
+    when(SUBSCRIPTIONS.get(any(byte[].class), any(byte[].class))).thenReturn(Subscriptions.GetResult.found(mock(
+        Subscriptions.Record.class)));
+    when(SUBSCRIPTIONS.create(any(byte[].class), any(byte[].class), any(Instant.class)))
+        .thenReturn(mock(Subscriptions.Record.class));
+
+    assertDoesNotThrow(() -> subscriptionManager.updateSubscriber(credentials, createPermitted));
+      verify(SUBSCRIPTIONS, never()).create(any(byte[].class), any(byte[].class), any(Instant.class));
+    verify(SUBSCRIPTIONS).accessedAt(aryEq(user), any(Instant.class));
   }
 
   @Test
-  void testCreateOnlyOnce() {
-    byte[] password1 = TestRandomUtil.nextBytes(16);
-    byte[] password2 = TestRandomUtil.nextBytes(16);
-    Instant created1 = Instant.ofEpochSecond(NOW_EPOCH_SECONDS);
-    Instant created2 = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 1);
+  void updateSubscriberMismatch() {
+    final byte[] user = TestRandomUtil.nextBytes(16);
+    final SubscriberCredentials credentials = new SubscriberCredentials(TestRandomUtil.nextBytes(32),
+        user,
+        TestRandomUtil.nextBytes(16),
+        TestRandomUtil.nextBytes(16),
+        Instant.now());
 
-    CompletableFuture<GetResult> getFuture = subscriptionManager.get(user, password1);
-    assertThat(getFuture).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult.type).isEqualTo(NOT_STORED);
-      assertThat(getResult.record).isNull();
-    });
+    when(SUBSCRIPTIONS.get(any(byte[].class), any(byte[].class))).thenReturn(Subscriptions.GetResult.PASSWORD_MISMATCH);
 
-    getFuture = subscriptionManager.get(user, password2);
-    assertThat(getFuture).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult.type).isEqualTo(NOT_STORED);
-      assertThat(getResult.record).isNull();
-    });
-
-    CompletableFuture<SubscriptionManager.Record> createFuture =
-        subscriptionManager.create(user, password1, created1);
-    Consumer<Record> recordRequirements = checkFreshlyCreatedRecord(user, password1, created1);
-    assertThat(createFuture).succeedsWithin(DEFAULT_TIMEOUT).satisfies(recordRequirements);
-
-    // password check fails so this should return null
-    createFuture = subscriptionManager.create(user, password2, created2);
-    assertThat(createFuture).succeedsWithin(DEFAULT_TIMEOUT).isNull();
-
-    // password check matches, but the record already exists so nothing should get updated
-    createFuture = subscriptionManager.create(user, password1, created2);
-    assertThat(createFuture).succeedsWithin(DEFAULT_TIMEOUT).satisfies(recordRequirements);
+    assertThrows(PurchaseForbiddenException.class,
+        () -> subscriptionManager.updateSubscriber(credentials, true));
+    verify(SUBSCRIPTIONS, never()).create(any(byte[].class), any(byte[].class), any(Instant.class));
   }
 
-  @Test
-  void testGet() {
-    byte[] wrongUser = TestRandomUtil.nextBytes(16);
-    byte[] wrongPassword = TestRandomUtil.nextBytes(16);
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-
-    assertThat(subscriptionManager.get(user, password)).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult.type).isEqualTo(FOUND);
-      assertThat(getResult.record).isNotNull().satisfies(checkFreshlyCreatedRecord(user, password, created));
-    });
-
-    assertThat(subscriptionManager.get(user, wrongPassword)).succeedsWithin(DEFAULT_TIMEOUT)
-        .satisfies(getResult -> {
-          assertThat(getResult.type).isEqualTo(PASSWORD_MISMATCH);
-          assertThat(getResult.record).isNull();
-        });
-
-    assertThat(subscriptionManager.get(wrongUser, password)).succeedsWithin(DEFAULT_TIMEOUT)
-        .satisfies(getResult -> {
-          assertThat(getResult.type).isEqualTo(NOT_STORED);
-          assertThat(getResult.record).isNull();
-        });
-  }
-
-  @Test
-  void testSetCustomerIdAndProcessor() throws Exception {
-    Instant subscriptionUpdated = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 1);
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-
-    final CompletableFuture<GetResult> getUser = subscriptionManager.get(user, password);
-    assertThat(getUser).succeedsWithin(DEFAULT_TIMEOUT);
-    final Record userRecord = getUser.get().record;
-
-    assertThat(subscriptionManager.setProcessorAndCustomerId(userRecord,
-        new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE),
-        subscriptionUpdated)).succeedsWithin(DEFAULT_TIMEOUT)
-        .hasFieldOrPropertyWithValue("processorCustomer",
-            Optional.of(new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE)));
-
-    final Condition<Throwable> clientError409Condition = new Condition<>(e ->
-        e instanceof ClientErrorException cee && cee.getResponse().getStatus() == 409, "Client error: 409");
-
-    // changing the customer ID is not permitted
-    assertThat(
-        subscriptionManager.setProcessorAndCustomerId(userRecord,
-            new ProcessorCustomer(customer + "1", SubscriptionProcessor.STRIPE),
-            subscriptionUpdated)).failsWithin(DEFAULT_TIMEOUT)
-        .withThrowableOfType(ExecutionException.class)
-        .withCauseInstanceOf(ClientErrorException.class)
-        .extracting(Throwable::getCause)
-        .satisfies(clientError409Condition);
-
-    // calling setProcessorAndCustomerId() with the same customer ID is also an error
-    assertThat(
-        subscriptionManager.setProcessorAndCustomerId(userRecord,
-            new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE),
-            subscriptionUpdated)).failsWithin(DEFAULT_TIMEOUT)
-        .withThrowableOfType(ExecutionException.class)
-        .withCauseInstanceOf(ClientErrorException.class)
-        .extracting(Throwable::getCause)
-        .satisfies(clientError409Condition);
-
-    assertThat(subscriptionManager.getSubscriberUserByProcessorCustomer(
-        new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE)))
-        .succeedsWithin(DEFAULT_TIMEOUT).
-        isEqualTo(user);
-  }
-
-  @Test
-  void testLookupByCustomerId() throws Exception {
-    Instant subscriptionUpdated = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 1);
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-
-    final CompletableFuture<GetResult> getUser = subscriptionManager.get(user, password);
-    assertThat(getUser).succeedsWithin(DEFAULT_TIMEOUT);
-    final Record userRecord = getUser.get().record;
-
-    assertThat(subscriptionManager.setProcessorAndCustomerId(userRecord,
-        new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE),
-        subscriptionUpdated)).succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.getSubscriberUserByProcessorCustomer(
-        new ProcessorCustomer(customer, SubscriptionProcessor.STRIPE))).
-        succeedsWithin(DEFAULT_TIMEOUT).
-        isEqualTo(user);
-  }
-
-  @Test
-  void testCanceledAt() {
-    Instant canceled = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 42);
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.canceledAt(user, canceled)).succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.get(user, password)).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult).isNotNull();
-      assertThat(getResult.type).isEqualTo(FOUND);
-      assertThat(getResult.record).isNotNull().satisfies(record -> {
-        assertThat(record.accessedAt).isEqualTo(canceled);
-        assertThat(record.canceledAt).isEqualTo(canceled);
-        assertThat(record.subscriptionId).isNull();
-      });
-    });
-  }
-
-  @Test
-  void testSubscriptionCreated() {
-    String subscriptionId = Base64.getEncoder().encodeToString(TestRandomUtil.nextBytes(16));
-    Instant subscriptionCreated = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 1);
-    long level = 42;
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.subscriptionCreated(user, subscriptionId, subscriptionCreated, level)).
-        succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.get(user, password)).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult).isNotNull();
-      assertThat(getResult.type).isEqualTo(FOUND);
-      assertThat(getResult.record).isNotNull().satisfies(record -> {
-        assertThat(record.accessedAt).isEqualTo(subscriptionCreated);
-        assertThat(record.subscriptionId).isEqualTo(subscriptionId);
-        assertThat(record.subscriptionCreatedAt).isEqualTo(subscriptionCreated);
-        assertThat(record.subscriptionLevel).isEqualTo(level);
-        assertThat(record.subscriptionLevelChangedAt).isEqualTo(subscriptionCreated);
-      });
-    });
-  }
-
-  @Test
-  void testSubscriptionLevelChanged() {
-    Instant at = Instant.ofEpochSecond(NOW_EPOCH_SECONDS + 500);
-    long level = 1776;
-    String updatedSubscriptionId = "new";
-    assertThat(subscriptionManager.create(user, password, created)).succeedsWithin(DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.subscriptionCreated(user, "original", created, level - 1)).succeedsWithin(
-        DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.subscriptionLevelChanged(user, at, level, updatedSubscriptionId)).succeedsWithin(
-        DEFAULT_TIMEOUT);
-    assertThat(subscriptionManager.get(user, password)).succeedsWithin(DEFAULT_TIMEOUT).satisfies(getResult -> {
-      assertThat(getResult).isNotNull();
-      assertThat(getResult.type).isEqualTo(FOUND);
-      assertThat(getResult.record).isNotNull().satisfies(record -> {
-        assertThat(record.accessedAt).isEqualTo(at);
-        assertThat(record.subscriptionLevelChangedAt).isEqualTo(at);
-        assertThat(record.subscriptionLevel).isEqualTo(level);
-        assertThat(record.subscriptionId).isEqualTo(updatedSubscriptionId);
-      });
-    });
-  }
-
-  @Test
-  void testProcessorAndCustomerId() {
-    final ProcessorCustomer processorCustomer =
-        new ProcessorCustomer("abc", SubscriptionProcessor.STRIPE);
-
-    assertThat(processorCustomer.toDynamoBytes()).isEqualTo(new byte[]{1, 97, 98, 99});
-  }
-
-  @Nonnull
-  private static Consumer<Record> checkFreshlyCreatedRecord(
-      byte[] user, byte[] password, Instant created) {
-    return record -> {
-      assertThat(record).isNotNull();
-      assertThat(record.user).isEqualTo(user);
-      assertThat(record.password).isEqualTo(password);
-      assertThat(record.processorCustomer).isNull();
-      assertThat(record.createdAt).isEqualTo(created);
-      assertThat(record.subscriptionId).isNull();
-      assertThat(record.subscriptionCreatedAt).isNull();
-      assertThat(record.subscriptionLevel).isNull();
-      assertThat(record.subscriptionLevelChangedAt).isNull();
-      assertThat(record.accessedAt).isEqualTo(created);
-      assertThat(record.canceledAt).isNull();
-      assertThat(record.currentPeriodEndsAt).isNull();
-    };
-  }
 }

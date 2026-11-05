@@ -11,7 +11,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes({
     @JsonSubTypes.Type(value = AnswerPushChallengeRequest.class, name = "rateLimitPushChallenge"),
-    @JsonSubTypes.Type(value = AnswerRecaptchaChallengeRequest.class, name = "recaptcha")
+    @JsonSubTypes.Type(value = AnswerCaptchaChallengeRequest.class, name = "captcha")
 })
 public abstract class AnswerChallengeRequest {
 }

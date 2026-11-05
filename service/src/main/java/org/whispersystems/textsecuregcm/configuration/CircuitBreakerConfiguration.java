@@ -8,13 +8,13 @@ package org.whispersystems.textsecuregcm.configuration;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
 
 public class CircuitBreakerConfiguration {
 
@@ -41,8 +41,7 @@ public class CircuitBreakerConfiguration {
 
   @JsonProperty
   @NotNull
-  @Min(1)
-  private long waitDurationInOpenStateInSeconds = 10;
+  private Duration waitDurationInOpenState = Duration.ofSeconds(10);
 
   @JsonProperty
   private List<String> ignoredExceptions = Collections.emptyList();
@@ -64,8 +63,8 @@ public class CircuitBreakerConfiguration {
     return slidingWindowMinimumNumberOfCalls;
   }
 
-  public long getWaitDurationInOpenStateInSeconds() {
-    return waitDurationInOpenStateInSeconds;
+  public Duration getWaitDurationInOpenState() {
+    return waitDurationInOpenState;
   }
 
   public List<Class<?>> getIgnoredExceptions() {
@@ -101,8 +100,8 @@ public class CircuitBreakerConfiguration {
   }
 
   @VisibleForTesting
-  public void setWaitDurationInOpenStateInSeconds(int seconds) {
-    this.waitDurationInOpenStateInSeconds = seconds;
+  public void setWaitDurationInOpenState(Duration duration) {
+    this.waitDurationInOpenState = duration;
   }
 
   @VisibleForTesting
@@ -115,9 +114,10 @@ public class CircuitBreakerConfiguration {
         .failureRateThreshold(getFailureRateThreshold())
         .ignoreExceptions(getIgnoredExceptions().toArray(new Class[0]))
         .permittedNumberOfCallsInHalfOpenState(getPermittedNumberOfCallsInHalfOpenState())
-        .waitDurationInOpenState(Duration.ofSeconds(getWaitDurationInOpenStateInSeconds()))
+        .waitDurationInOpenState(getWaitDurationInOpenState())
         .slidingWindow(getSlidingWindowSize(), getSlidingWindowMinimumNumberOfCalls(),
-            CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+            CircuitBreakerConfig.SlidingWindowType.COUNT_BASED,
+            CircuitBreakerConfig.SlidingWindowSynchronizationStrategy.SYNCHRONIZED)
         .build();
   }
 }

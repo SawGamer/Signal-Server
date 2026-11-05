@@ -1,22 +1,45 @@
 /*
- * Copyright 2013-2020 Signal Messenger, LLC
+ * Copyright 2026 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 package org.whispersystems.textsecuregcm.configuration.dynamic;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import javax.annotation.Nullable;
 import java.util.Collections;
 import java.util.List;
-import javax.validation.Valid;
-import org.whispersystems.textsecuregcm.configuration.TurnUriConfiguration;
 
 public class DynamicTurnConfiguration {
 
   @JsonProperty
-  private List<@Valid TurnUriConfiguration> uriConfigs = Collections.emptyList();
+  @NotNull
+  @Valid
+  private List<@NotBlank String> urls = Collections.emptyList();
 
-  public List<TurnUriConfiguration> getUriConfigs() {
-    return uriConfigs;
+  @JsonProperty
+  @NotNull
+  @Valid
+  private List<@NotBlank String> urlsWithIps = Collections.emptyList();
+
+  @JsonProperty
+  @Nullable
+  private String hostname = null;
+
+  public DynamicTurnConfiguration() {}
+
+  public List<String> getUrls() {
+    return urls;
+  }
+
+  public List<String> getUrlsWithIps() {
+    return urlsWithIps;
+  }
+
+  public @Nullable String getHostname() {
+    return hostname;
   }
 }

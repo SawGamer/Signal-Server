@@ -6,12 +6,9 @@
 package org.whispersystems.textsecuregcm.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-
-import javax.validation.constraints.Min;
-
-import java.time.Duration;
-
 import io.github.resilience4j.retry.RetryConfig;
+import jakarta.validation.constraints.Min;
+import java.time.Duration;
 
 public class RetryConfiguration {
 
@@ -39,13 +36,9 @@ public class RetryConfiguration {
     this.waitDuration = waitDuration;
   }
 
-  public RetryConfig toRetryConfig() {
-    return toRetryConfigBuilder().build();
-  }
-
   public <T> RetryConfig.Builder<T> toRetryConfigBuilder() {
     return RetryConfig.<T>custom()
-                      .maxAttempts(getMaxAttempts())
-                      .waitDuration(Duration.ofMillis(getWaitDuration()));
+        .maxAttempts(getMaxAttempts())
+        .waitDuration(Duration.ofMillis(getWaitDuration()));
   }
 }

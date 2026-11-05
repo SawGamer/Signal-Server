@@ -12,65 +12,55 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.util.Util;
+
+import static io.lettuce.core.ExpireArgs.Builder.nx;
 
 /**
  * Estimate the number of unique items seen over a configurable period and update a metric
  */
 public class CardinalityEstimator {
 
-  private volatile double uniqueElementCount;
-  private final FaultTolerantRedisCluster redisCluster;
+  private volatile long uniqueElementCount;
+  private final FaultTolerantRedisClusterClient redisCluster;
   private final String hllName;
   private final Duration period;
 
-  public CardinalityEstimator(final FaultTolerantRedisCluster redisCluster, final String name, final Duration period) {
+  public CardinalityEstimator(final FaultTolerantRedisClusterClient redisCluster, final String name, final Duration period) {
     this.redisCluster = redisCluster;
     this.hllName = "cardinality_estimator::" + name;
     this.period = period;
     Metrics.gauge(
         MetricsUtil.name(getClass(), "unique"),
-        Tags.of("name", name),
+        Tags.of("metricName", name),
         this,
         obj -> obj.uniqueElementCount);
   }
 
-  public void add(String element) {
+  public void add(final String element) {
     addAsync(element).toCompletableFuture().join();
   }
 
-  public CompletionStage<Void> addAsync(String element) {
+  public CompletionStage<Void> addAsync(final String element) {
     return redisCluster.withCluster(connection -> connection.async()
         .pfadd(hllName, element)
         .thenCompose(modCount -> {
           if (modCount == 0) {
-            return CompletableFuture.completedFuture(false);
+            // The hll hasn't changed - return our current view of cardinality
+            return CompletableFuture.completedFuture(uniqueElementCount);
           }
 
-          // The hll changed - update our local view of the cardinality, and
-          // initialize the TTL if required
-          return connection.async()
-              .pfcount(hllName)
-              .thenCompose(count -> {
-                uniqueElementCount = count;
-                // check if this is a new hll with no TTL set
-                return connection.async().ttl(hllName).thenApply(ttl -> ttl == -1);
-              });
+          return connection.async().pfcount(hllName);
         })
-        .thenCompose(isNewHll -> {
-          if (!isNewHll) {
-            return CompletableFuture.completedFuture(null);
-          }
-
-          // If this is a new hll, we need to set the TTL. This could be
-          // a single atomic op in redis 7.x with EXPIRE NX
-          return connection.async().expire(hllName, period).thenRun(Util.NOOP);
+        .thenCompose(newUniqueElementCount -> {
+          uniqueElementCount = newUniqueElementCount;
+          return connection.async().expire(hllName, period, nx()).thenRun(Util.NOOP);
         }));
   }
 
   @VisibleForTesting
   long estimate() {
-    return (long) this.uniqueElementCount;
+    return this.uniqueElementCount;
   }
 }

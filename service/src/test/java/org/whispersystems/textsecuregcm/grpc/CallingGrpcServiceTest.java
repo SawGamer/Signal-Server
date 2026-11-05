@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Signal Messenger, LLC
+ * Copyright 2026 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
@@ -7,68 +7,96 @@ package org.whispersystems.textsecuregcm.grpc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.whispersystems.textsecuregcm.grpc.GrpcTestUtils.assertRateLimitExceeded;
 
+import io.grpc.Status;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.signal.chat.calling.CallingGrpc;
-import org.signal.chat.calling.GetTurnCredentialsRequest;
-import org.signal.chat.calling.GetTurnCredentialsResponse;
+import org.signal.chat.calling.GetCallingRelaysRequest;
+import org.signal.chat.calling.GetCallingRelaysResponse;
+import org.whispersystems.textsecuregcm.auth.CloudflareTurnCredentialsManager;
 import org.whispersystems.textsecuregcm.auth.TurnToken;
-import org.whispersystems.textsecuregcm.auth.TurnTokenGenerator;
+import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.util.MockUtils;
 
 class CallingGrpcServiceTest extends SimpleBaseGrpcTest<CallingGrpcService, CallingGrpc.CallingBlockingStub> {
 
   @Mock
-  private TurnTokenGenerator turnTokenGenerator;
+  private CloudflareTurnCredentialsManager cloudflareTurnCredentialsManager;
 
   @Mock
-  private RateLimiter turnCredentialRateLimiter;
-
+  private RateLimiter rateLimiter;
 
   @Override
   protected CallingGrpcService createServiceBeforeEachTest() {
     final RateLimiters rateLimiters = mock(RateLimiters.class);
-    when(rateLimiters.getTurnLimiter()).thenReturn(turnCredentialRateLimiter);
-    return new CallingGrpcService(turnTokenGenerator, rateLimiters);
+    when(rateLimiters.getCallEndpointLimiter()).thenReturn(rateLimiter);
+
+    return new CallingGrpcService(cloudflareTurnCredentialsManager, rateLimiters);
   }
 
   @Test
-  void getTurnCredentials() {
-    final String username = "test-username";
-    final String password = "test-password";
-    final List<String> urls = List.of("first", "second");
+  void getCallingRelays() throws IOException {
+    final String username = "username";
+    final String password = "password";
+    final long credentialTtlSeconds = 73;
+    final String hostnameTurnUrl = "turn:example.com:443";
+    final String ipTurnUrl = "turn:127.0.0.1:80";
+    final String ipTurnsUrl = "turns:127.0.0.1:443";
+    final String hostname = "example.com";
 
-    MockUtils.updateRateLimiterResponseToAllow(turnCredentialRateLimiter, AUTHENTICATED_ACI);
-    when(turnTokenGenerator.generate(any())).thenReturn(new TurnToken(username, password, urls));
+    when(cloudflareTurnCredentialsManager.retrieveFromCloudflare(any()))
+        .thenReturn(new TurnToken(username,
+            password,
+            credentialTtlSeconds,
+            List.of(hostnameTurnUrl),
+            List.of(ipTurnUrl, ipTurnsUrl),
+            hostname));
 
-    final GetTurnCredentialsResponse response = authenticatedServiceStub().getTurnCredentials(GetTurnCredentialsRequest.newBuilder().build());
-
-    final GetTurnCredentialsResponse expectedResponse = GetTurnCredentialsResponse.newBuilder()
-        .setUsername(username)
-        .setPassword(password)
-        .addAllUrls(urls)
-        .build();
-
-    assertEquals(expectedResponse, response);
+    assertEquals(GetCallingRelaysResponse.newBuilder()
+        .addRelays(GetCallingRelaysResponse.Relay.newBuilder()
+            .setUsername(username)
+            .setPassword(password)
+            .setCredentialTtlSeconds(credentialTtlSeconds)
+            .setHostnameUrls(GetCallingRelaysResponse.HostnameUrlList.newBuilder()
+                .addUrls(hostnameTurnUrl)
+                .build())
+            .setIpUrls(GetCallingRelaysResponse.IpUrlList.newBuilder()
+                .addUrls(ipTurnUrl)
+                .addUrls(ipTurnsUrl)
+                .setHostname(hostname)
+                .build())
+            .build())
+        .build(),
+        authenticatedServiceStub().getCallingRelays(GetCallingRelaysRequest.getDefaultInstance()));
   }
 
   @Test
-  void getTurnCredentialsRateLimited() {
-    final Duration retryAfter = MockUtils.updateRateLimiterResponseToFail(
-        turnCredentialRateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(19), false);
-    assertRateLimitExceeded(retryAfter, () -> authenticatedServiceStub().getTurnCredentials(GetTurnCredentialsRequest.newBuilder().build()));
-    verify(turnTokenGenerator, never()).generate(any());
-    verifyNoInteractions(turnTokenGenerator);
+  void getCallingRelaysIoException() throws IOException {
+    when(cloudflareTurnCredentialsManager.retrieveFromCloudflare(any()))
+        .thenThrow(IOException.class);
+
+    GrpcTestUtils.assertStatusException(Status.UNAVAILABLE,
+        () -> authenticatedServiceStub().getCallingRelays(GetCallingRelaysRequest.getDefaultInstance()));
+  }
+
+  @Test
+  void getCallingRelaysRateLimited() throws RateLimitExceededException {
+    final Duration retryAfter = Duration.ofSeconds(19);
+
+    doThrow(new RateLimitExceededException(retryAfter))
+        .when(rateLimiter).validate(any(UUID.class));
+
+    //noinspection ResultOfMethodCallIgnored
+    GrpcTestUtils.assertRateLimitExceeded(retryAfter,
+        () -> authenticatedServiceStub().getCallingRelays(GetCallingRelaysRequest.getDefaultInstance()));
   }
 }

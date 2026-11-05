@@ -9,63 +9,52 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.collection.IsEmptyCollection.empty;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyByte;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.anyBoolean;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.whispersystems.textsecuregcm.tests.util.JsonHelpers.asJson;
 import static org.whispersystems.textsecuregcm.tests.util.JsonHelpers.jsonFixture;
-import static org.whispersystems.textsecuregcm.util.MockUtils.exactly;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.google.common.util.concurrent.MoreExecutors;
-import com.google.protobuf.ByteString;
 import io.dropwizard.auth.AuthValueFactoryProvider;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
 import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 import java.util.stream.Stream;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.client.Invocation;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
+import javax.annotation.Nullable;
 import org.glassfish.jersey.server.ServerProperties;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.hamcrest.Matcher;
@@ -76,69 +65,47 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.junitpioneer.jupiter.cartesian.ArgumentSets;
-import org.junitpioneer.jupiter.cartesian.CartesianTest;
 import org.mockito.ArgumentCaptor;
-import org.signal.libsignal.protocol.ServiceId;
-import org.signal.libsignal.protocol.ecc.Curve;
-import org.signal.libsignal.protocol.ecc.ECKeyPair;
-import org.signal.libsignal.protocol.util.Hex;
-import org.signal.libsignal.zkgroup.groups.ClientZkGroupCipher;
-import org.signal.libsignal.zkgroup.groups.GroupMasterKey;
-import org.signal.libsignal.zkgroup.groups.GroupSecretParams;
-import org.signal.libsignal.zkgroup.groups.UuidCiphertext;
-import org.signal.libsignal.zkgroup.groupsend.GroupSendCredential;
-import org.signal.libsignal.zkgroup.groupsend.GroupSendCredentialPresentation;
-import org.signal.libsignal.zkgroup.groupsend.GroupSendCredentialResponse;
-import org.signal.libsignal.zkgroup.ServerPublicParams;
 import org.signal.libsignal.zkgroup.ServerSecretParams;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicInboundMessageByteLimitConfiguration;
-import org.whispersystems.textsecuregcm.entities.AccountMismatchedDevices;
-import org.whispersystems.textsecuregcm.entities.AccountStaleDevices;
-import org.whispersystems.textsecuregcm.entities.IncomingMessage;
 import org.whispersystems.textsecuregcm.entities.IncomingMessageList;
-import org.whispersystems.textsecuregcm.entities.MessageProtos;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
-import org.whispersystems.textsecuregcm.entities.MismatchedDevices;
-import org.whispersystems.textsecuregcm.entities.OutgoingMessageEntity;
-import org.whispersystems.textsecuregcm.entities.OutgoingMessageEntityList;
+import org.whispersystems.textsecuregcm.entities.MismatchedDevicesResponse;
 import org.whispersystems.textsecuregcm.entities.SendMultiRecipientMessageResponse;
 import org.whispersystems.textsecuregcm.entities.SpamReport;
-import org.whispersystems.textsecuregcm.entities.StaleDevices;
+import org.whispersystems.textsecuregcm.entities.StaleDevicesResponse;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.limits.CardinalityEstimator;
 import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
+import org.whispersystems.textsecuregcm.mappers.CompletionExceptionMapper;
 import org.whispersystems.textsecuregcm.mappers.RateLimitExceededExceptionMapper;
 import org.whispersystems.textsecuregcm.providers.MultiRecipientMessageProvider;
 import org.whispersystems.textsecuregcm.push.MessageSender;
-import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
+import org.whispersystems.textsecuregcm.push.MessageTooLargeException;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
-import org.whispersystems.textsecuregcm.push.ReceiptSender;
-import org.whispersystems.textsecuregcm.spam.ReportSpamTokenProvider;
+import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
+import org.whispersystems.textsecuregcm.spam.SpamChecker;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
-import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.MessagesManager;
+import org.whispersystems.textsecuregcm.storage.PhoneNumberIdentifiers;
 import org.whispersystems.textsecuregcm.storage.ReportMessageManager;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
-import org.whispersystems.textsecuregcm.util.CompletableFutureTestUtil;
+import org.whispersystems.textsecuregcm.tests.util.MultiRecipientMessageHelper;
+import org.whispersystems.textsecuregcm.tests.util.TestRecipient;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
-import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
-import org.whispersystems.textsecuregcm.util.UUIDUtil;
-import org.whispersystems.websocket.Stories;
-import reactor.core.publisher.Mono;
+import org.whispersystems.textsecuregcm.util.TestClock;
+import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
@@ -147,18 +114,18 @@ class MessageControllerTest {
 
   private static final String SINGLE_DEVICE_RECIPIENT = "+14151111111";
   private static final UUID SINGLE_DEVICE_UUID = UUID.randomUUID();
-  private static final ServiceIdentifier SINGLE_DEVICE_ACI_ID = new AciServiceIdentifier(SINGLE_DEVICE_UUID);
+  private static final AciServiceIdentifier SINGLE_DEVICE_ACI_ID = new AciServiceIdentifier(SINGLE_DEVICE_UUID);
   private static final UUID SINGLE_DEVICE_PNI = UUID.randomUUID();
-  private static final ServiceIdentifier SINGLE_DEVICE_PNI_ID = new PniServiceIdentifier(SINGLE_DEVICE_PNI);
+  private static final PniServiceIdentifier SINGLE_DEVICE_PNI_ID = new PniServiceIdentifier(SINGLE_DEVICE_PNI);
   private static final byte SINGLE_DEVICE_ID1 = 1;
   private static final int SINGLE_DEVICE_REG_ID1 = 111;
   private static final int SINGLE_DEVICE_PNI_REG_ID1 = 1111;
 
   private static final String MULTI_DEVICE_RECIPIENT = "+14152222222";
   private static final UUID MULTI_DEVICE_UUID = UUID.randomUUID();
-  private static final ServiceIdentifier MULTI_DEVICE_ACI_ID = new AciServiceIdentifier(MULTI_DEVICE_UUID);
+  private static final AciServiceIdentifier MULTI_DEVICE_ACI_ID = new AciServiceIdentifier(MULTI_DEVICE_UUID);
   private static final UUID MULTI_DEVICE_PNI = UUID.randomUUID();
-  private static final ServiceIdentifier MULTI_DEVICE_PNI_ID = new PniServiceIdentifier(MULTI_DEVICE_PNI);
+  private static final PniServiceIdentifier MULTI_DEVICE_PNI_ID = new PniServiceIdentifier(MULTI_DEVICE_PNI);
   private static final byte MULTI_DEVICE_ID1 = 1;
   private static final byte MULTI_DEVICE_ID2 = 2;
   private static final byte MULTI_DEVICE_ID3 = 3;
@@ -170,8 +137,8 @@ class MessageControllerTest {
   private static final int MULTI_DEVICE_PNI_REG_ID3 = 4444;
 
   private static final UUID NONEXISTENT_UUID = UUID.randomUUID();
-  private static final ServiceIdentifier NONEXISTENT_ACI_ID = new AciServiceIdentifier(NONEXISTENT_UUID);
-  private static final ServiceIdentifier NONEXISTENT_PNI_ID = new PniServiceIdentifier(NONEXISTENT_UUID);
+  private static final AciServiceIdentifier NONEXISTENT_ACI_ID = new AciServiceIdentifier(NONEXISTENT_UUID);
+  private static final PniServiceIdentifier NONEXISTENT_PNI_ID = new PniServiceIdentifier(NONEXISTENT_UUID);
 
   private static final byte[] UNIDENTIFIED_ACCESS_BYTES = "0123456789abcdef".getBytes();
 
@@ -182,47 +149,51 @@ class MessageControllerTest {
   private static final RedisAdvancedClusterCommands<String, String> redisCommands  = mock(RedisAdvancedClusterCommands.class);
 
   private static final MessageSender messageSender = mock(MessageSender.class);
-  private static final ReceiptSender receiptSender = mock(ReceiptSender.class);
   private static final AccountsManager accountsManager = mock(AccountsManager.class);
   private static final MessagesManager messagesManager = mock(MessagesManager.class);
   private static final RateLimiters rateLimiters = mock(RateLimiters.class);
   private static final CardinalityEstimator cardinalityEstimator = mock(CardinalityEstimator.class);
   private static final RateLimiter rateLimiter = mock(RateLimiter.class);
+  private static final PhoneNumberIdentifiers phoneNumberIdentifiers = mock(PhoneNumberIdentifiers.class);
   private static final PushNotificationManager pushNotificationManager = mock(PushNotificationManager.class);
+  private static final PushNotificationScheduler pushNotificationScheduler = mock(PushNotificationScheduler.class);
   private static final ReportMessageManager reportMessageManager = mock(ReportMessageManager.class);
-  private static final ExecutorService multiRecipientMessageExecutor = MoreExecutors.newDirectExecutorService();
   private static final Scheduler messageDeliveryScheduler = Schedulers.newBoundedElastic(10, 10_000, "messageDelivery");
-  private static final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager = mock(DynamicConfigurationManager.class);
+
   private static final ServerSecretParams serverSecretParams = ServerSecretParams.generate();
+
+  private static final TestClock clock = TestClock.now();
+
+  private static final Instant START_OF_DAY = LocalDate.now(clock).atStartOfDay().toInstant(ZoneOffset.UTC);
 
   private static final ResourceExtension resources = ResourceExtension.builder()
       .addProperty(ServerProperties.UNWRAP_COMPLETION_STAGE_IN_WRITER_ENABLE, Boolean.TRUE)
       .addProvider(AuthHelper.getAuthFilter())
-      .addProvider(new AuthValueFactoryProvider.Binder<>(AuthenticatedAccount.class))
+      .addProvider(new AuthValueFactoryProvider.Binder<>(AuthenticatedDevice.class))
       .addProvider(RateLimitExceededExceptionMapper.class)
+      .addProvider(CompletionExceptionMapper.class)
       .addProvider(MultiRecipientMessageProvider.class)
       .setTestContainerFactory(new GrizzlyWebTestContainerFactory())
-      .addResource(
-          new MessageController(rateLimiters, cardinalityEstimator, messageSender, receiptSender, accountsManager,
-              messagesManager, pushNotificationManager, reportMessageManager, multiRecipientMessageExecutor,
-              messageDeliveryScheduler, ReportSpamTokenProvider.noop(), mock(ClientReleaseManager.class), dynamicConfigurationManager,
-              serverSecretParams))
+      .addResource(new MessageController(rateLimiters, cardinalityEstimator, messageSender, accountsManager,
+              phoneNumberIdentifiers, reportMessageManager, serverSecretParams, SpamChecker.noop(), clock))
       .build();
 
   @BeforeEach
-  void setup() {
-    final ECKeyPair identityKeyPair = Curve.generateKeyPair();
+  void setup()
+      throws MultiRecipientMismatchedDevicesException, MessageTooLargeException, MessageDeliveryNotAllowedException {
+    reset(pushNotificationScheduler);
 
-
+    when(messageSender.sendMultiRecipientMessage(any(), any(), anyLong(), anyBoolean(), anyBoolean(), anyBoolean(), any()))
+        .thenReturn(CompletableFuture.completedFuture(null));
 
     final List<Device> singleDeviceList = List.of(
-        generateTestDevice(SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1, SINGLE_DEVICE_PNI_REG_ID1, System.currentTimeMillis(), System.currentTimeMillis())
+        generateTestDevice(SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1, SINGLE_DEVICE_PNI_REG_ID1, true)
     );
 
     final List<Device> multiDeviceList = List.of(
-        generateTestDevice(MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, MULTI_DEVICE_PNI_REG_ID1, System.currentTimeMillis(), System.currentTimeMillis()),
-        generateTestDevice(MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2, MULTI_DEVICE_PNI_REG_ID2, System.currentTimeMillis(), System.currentTimeMillis()),
-        generateTestDevice(MULTI_DEVICE_ID3, MULTI_DEVICE_REG_ID3, MULTI_DEVICE_PNI_REG_ID3, System.currentTimeMillis(), System.currentTimeMillis() - TimeUnit.DAYS.toMillis(31))
+        generateTestDevice(MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, MULTI_DEVICE_PNI_REG_ID1, true),
+        generateTestDevice(MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2, MULTI_DEVICE_PNI_REG_ID2, true),
+        generateTestDevice(MULTI_DEVICE_ID3, MULTI_DEVICE_REG_ID3, MULTI_DEVICE_PNI_REG_ID3, false)
     );
 
     Account singleDeviceAccount  = AccountsHelper.generateTestAccount(SINGLE_DEVICE_RECIPIENT, SINGLE_DEVICE_UUID, SINGLE_DEVICE_PNI, singleDeviceList, UNIDENTIFIED_ACCESS_BYTES);
@@ -245,32 +216,30 @@ class MessageControllerTest {
     when(accountsManager.getByServiceIdentifierAsync(MULTI_DEVICE_PNI_ID)).thenReturn(CompletableFuture.completedFuture(Optional.of(multiDeviceAccount)));
     when(accountsManager.getByServiceIdentifierAsync(new AciServiceIdentifier(INTERNATIONAL_UUID))).thenReturn(CompletableFuture.completedFuture(Optional.of(internationalAccount)));
 
-    final DynamicInboundMessageByteLimitConfiguration inboundMessageByteLimitConfiguration =
-        mock(DynamicInboundMessageByteLimitConfiguration.class);
+    when(accountsManager.getByAccountIdentifier(AuthHelper.VALID_UUID)).thenReturn(Optional.of(AuthHelper.VALID_ACCOUNT));
+    when(accountsManager.getByAccountIdentifierAsync(AuthHelper.VALID_UUID))
+        .thenReturn(CompletableFuture.completedFuture(Optional.of(AuthHelper.VALID_ACCOUNT)));
 
-    when(inboundMessageByteLimitConfiguration.enforceInboundLimit()).thenReturn(false);
-
-    final DynamicConfiguration dynamicConfiguration = mock(DynamicConfiguration.class);
-    when(dynamicConfiguration.getInboundMessageByteLimitConfiguration()).thenReturn(inboundMessageByteLimitConfiguration);
-
-    when(dynamicConfigurationManager.getConfiguration()).thenReturn(dynamicConfiguration);
+    when(accountsManager.getByAccountIdentifier(AuthHelper.VALID_UUID_3)).thenReturn(Optional.of(AuthHelper.VALID_ACCOUNT_3));
+    when(accountsManager.getByAccountIdentifierAsync(AuthHelper.VALID_UUID_3))
+        .thenReturn(CompletableFuture.completedFuture(Optional.of(AuthHelper.VALID_ACCOUNT_3)));
 
     when(rateLimiters.getMessagesLimiter()).thenReturn(rateLimiter);
     when(rateLimiters.getStoriesLimiter()).thenReturn(rateLimiter);
     when(rateLimiters.getInboundMessageBytes()).thenReturn(rateLimiter);
 
     when(rateLimiter.validateAsync(any(UUID.class))).thenReturn(CompletableFuture.completedFuture(null));
+
+    clock.unpin();
   }
 
   private static Device generateTestDevice(final byte id, final int registrationId, final int pniRegistrationId,
-      final long createdAt, final long lastSeen) {
+      final boolean enabled) {
     final Device device = new Device();
     device.setId(id);
     device.setRegistrationId(registrationId);
     device.setPhoneNumberIdentityRegistrationId(pniRegistrationId);
-    device.setCreated(createdAt);
-    device.setLastSeen(lastSeen);
-    device.setGcmId("isgcm");
+    device.setFetchesMessages(enabled);
 
     return device;
   }
@@ -280,12 +249,12 @@ class MessageControllerTest {
     reset(
         redisCommands,
         messageSender,
-        receiptSender,
         accountsManager,
         messagesManager,
         rateLimiters,
         rateLimiter,
         cardinalityEstimator,
+        phoneNumberIdentifiers,
         pushNotificationManager,
         reportMessageManager
     );
@@ -298,23 +267,27 @@ class MessageControllerTest {
 
   @Test
   void testSingleDeviceCurrent() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response", response.getStatus(), is(equalTo(200)));
 
-    ArgumentCaptor<Envelope> captor = ArgumentCaptor.forClass(Envelope.class);
-    verify(messageSender, times(1)).sendMessage(any(Account.class), any(Device.class), captor.capture(), eq(false));
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> captor = ArgumentCaptor.forClass(Map.class);
+      verify(messageSender).sendMessages(any(), any(), captor.capture(), any(), eq(Optional.empty()), any());
 
-    assertTrue(captor.getValue().hasSourceUuid());
-    assertTrue(captor.getValue().hasSourceDevice());
-    assertTrue(captor.getValue().getUrgent());
+      assertEquals(1, captor.getValue().size());
+      final Envelope message = captor.getValue().values().stream().findFirst().orElseThrow();
+
+      assertTrue(message.hasSourceServiceId());
+      assertTrue(message.hasSourceDevice());
+      assertTrue(message.getUrgent());
+    }
   }
 
   @ParameterizedTest
@@ -333,434 +306,414 @@ class MessageControllerTest {
                     IncomingMessageList.class),
                 MediaType.APPLICATION_JSON_TYPE))) {
 
-      assertThat(response.getStatus(), is(equalTo(sendToPni ? 403 : 200)));
+      if (sendToPni) {
+        assertThat(response.getStatus(), is(equalTo(403)));
+        verify(messageSender, never()).sendMessages(any(), any(), any(), any(), any(), any());
+      } else {
+        assertThat(response.getStatus(), is(equalTo(200)));
+
+        verify(messageSender).sendMessages(any(),
+            eq(serviceIdentifier),
+            any(),
+            any(),
+            eq(Optional.of(Device.PRIMARY_ID)),
+            any());
+      }
     }
   }
 
   @Test
   void testSingleDeviceCurrentNotUrgent() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device_not_urgent.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response", response.getStatus(), is(equalTo(200)));
 
-    ArgumentCaptor<Envelope> captor = ArgumentCaptor.forClass(Envelope.class);
-    verify(messageSender, times(1)).sendMessage(any(Account.class), any(Device.class), captor.capture(), eq(false));
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> captor = ArgumentCaptor.forClass(Map.class);
+      verify(messageSender).sendMessages(any(), any(), captor.capture(), any(), eq(Optional.empty()), any());
 
-    assertTrue(captor.getValue().hasSourceUuid());
-    assertTrue(captor.getValue().hasSourceDevice());
-    assertFalse(captor.getValue().getUrgent());
+      assertEquals(1, captor.getValue().size());
+      final Envelope message = captor.getValue().values().stream().findFirst().orElseThrow();
+
+      assertTrue(message.hasSourceServiceId());
+      assertTrue(message.hasSourceDevice());
+      assertFalse(message.getUrgent());
+    }
   }
 
   @Test
   void testSingleDeviceCurrentByPni() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/PNI:%s", SINGLE_DEVICE_PNI))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response", response.getStatus(), is(equalTo(200)));
 
-    ArgumentCaptor<Envelope> captor = ArgumentCaptor.forClass(Envelope.class);
-    verify(messageSender, times(1)).sendMessage(any(Account.class), any(Device.class), captor.capture(), eq(false));
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> captor = ArgumentCaptor.forClass(Map.class);
+      verify(messageSender).sendMessages(any(), any(), captor.capture(), any(), eq(Optional.empty()), any());
 
-    assertTrue(captor.getValue().hasSourceUuid());
-    assertTrue(captor.getValue().hasSourceDevice());
+      assertEquals(1, captor.getValue().size());
+      final Envelope message = captor.getValue().values().stream().findFirst().orElseThrow();
+
+      assertTrue(message.hasSourceServiceId());
+      assertTrue(message.hasSourceDevice());
+    }
   }
 
   @Test
   void testNullMessageInList() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_null_message_in_list.json"), IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Bad request", response.getStatus(), is(equalTo(422)));
+      assertThat("Bad request", response.getStatus(), is(equalTo(422)));
+    }
   }
 
   @Test
   void testSingleDeviceCurrentUnidentified() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response", response.getStatus(), is(equalTo(200)));
 
-    ArgumentCaptor<Envelope> captor = ArgumentCaptor.forClass(Envelope.class);
-    verify(messageSender, times(1)).sendMessage(any(Account.class), any(Device.class), captor.capture(), eq(false));
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> captor = ArgumentCaptor.forClass(Map.class);
+      verify(messageSender).sendMessages(any(), any(), captor.capture(), any(), eq(Optional.empty()), any());
 
-    assertFalse(captor.getValue().hasSourceUuid());
-    assertFalse(captor.getValue().hasSourceDevice());
+      assertEquals(1, captor.getValue().size());
+      final Envelope message = captor.getValue().values().stream().findFirst().orElseThrow();
+
+      assertFalse(message.hasSourceServiceId());
+      assertFalse(message.hasSourceDevice());
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testSingleDeviceCurrentUnidentifiedEmptyMessages(
+      final boolean story) throws Exception {
+    try (final Response response =
+        resources.getJerseyTest()
+            .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
+            .queryParam("story", story)
+            .request()
+            .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES))
+            .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_empty.json"),
+                    IncomingMessageList.class),
+                MediaType.APPLICATION_JSON_TYPE))) {
+
+      assertThat("Unprocessable entity", response.getStatus(), is(equalTo(422)));
+
+      verifyNoMoreInteractions(messageSender);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void testSingleDeviceCurrentGroupSendEndorsement(
+      ServiceIdentifier recipient, ServiceIdentifier authorizedRecipient,
+      Duration timeLeft, boolean includeUak, boolean story, int expectedResponse) throws Exception {
+    final Instant expiration = Instant.now().truncatedTo(ChronoUnit.DAYS); // expiration times must be UTC midnight or libsignal will reject the endorsement
+    clock.pin(expiration.minus(timeLeft));
+
+    Invocation.Builder builder =
+        resources.getJerseyTest()
+            .target(String.format("/v1/messages/%s", recipient.toServiceIdentifierString()))
+            .queryParam("story", story)
+            .request()
+            .header(HeaderUtils.GROUP_SEND_TOKEN,
+                AuthHelper.validGroupSendTokenHeader(serverSecretParams, List.of(authorizedRecipient), expiration));
+
+    if (includeUak) {
+      builder = builder.header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES));
+    }
+
+    try (final Response response = builder
+        .put(Entity.entity(
+                SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
+                    IncomingMessageList.class),
+                MediaType.APPLICATION_JSON_TYPE))) {
+
+      assertThat("Good Response", response.getStatus(), is(equalTo(expectedResponse)));
+      if (expectedResponse == 200) {
+        @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(messageSender).sendMessages(any(), any(), captor.capture(), any(), eq(Optional.empty()), any());
+
+        assertEquals(1, captor.getValue().size());
+        final Envelope message = captor.getValue().values().stream().findFirst().orElseThrow();
+
+        assertFalse(message.hasSourceServiceId());
+        assertFalse(message.hasSourceDevice());
+      } else {
+        verifyNoMoreInteractions(messageSender);
+      }
+    }
+  }
+
+  private static Stream<Arguments> testSingleDeviceCurrentGroupSendEndorsement() {
+    return Stream.of(
+        Arguments.argumentSet("valid endorsement", SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ACI_ID, Duration.ofHours(1), false, false, 200),
+
+        Arguments.argumentSet("expired endorsement, not authorized", SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ACI_ID, Duration.ofHours(-1), false, false, 401),
+
+        Arguments.argumentSet("endorsement for the wrong recipient, not authorized", SINGLE_DEVICE_ACI_ID, NONEXISTENT_ACI_ID, Duration.ofHours(1), false, false, 401),
+
+        Arguments.argumentSet("expired endorsement for the wrong recipient, not authorized", SINGLE_DEVICE_ACI_ID, NONEXISTENT_ACI_ID, Duration.ofHours(-1), false, false, 401),
+
+        Arguments.argumentSet("valid endorsement for the right recipient but they aren't registered, not found", NONEXISTENT_ACI_ID, NONEXISTENT_ACI_ID, Duration.ofHours(1), false, false, 404),
+
+        Arguments.argumentSet("expired endorsement for the right recipient but they aren't registered, not authorized (NOT not found)", NONEXISTENT_ACI_ID, NONEXISTENT_ACI_ID, Duration.ofHours(-1), false, false, 401),
+
+        Arguments.argumentSet("valid endorsement but also a UAK, bad request", SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ACI_ID, Duration.ofHours(1), true, false, 400),
+
+        Arguments.argumentSet("valid endorsement on a story, bad request", SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ACI_ID, Duration.ofHours(1), false, true, 400),
+
+        Arguments.argumentSet("valid endorsement on a story with a UAK, bad request", SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ACI_ID, Duration.ofHours(1), true, true, 400));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+      "-1, 422",
+      "0, 200",
+      "1, 200",
+      "8640000000000000, 200",
+      "8640000000000001, 422",
+
+      // This is something of a quirk; because this failure is happening at the parsing layer (we can't parse it as a
+      // `long`) instead of the validation layer, we get a 400 instead of a 422
+      "99999999999999999999999999999999999, 400"
+  })
+  void testSingleDeviceExtremeTimestamp(final String timestamp, final int expectedStatus) {
+    final String jsonTemplate = """
+        {
+            "timestamp" : %s,
+            "messages" : [{
+                "type" : 1,
+                "destinationDeviceId" : 1,
+                "content" : "Zm9vYmFyego"
+            }]
+        }
+        """;
+
+    final String json = String.format(jsonTemplate, timestamp);
+
+    try (final Response response =
+        resources.getJerseyTest()
+            .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
+            .request()
+            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
+            .put(Entity.json(json))) {
+
+      assertThat(response.getStatus(), is(equalTo(expectedStatus)));
+    }
+  }
+
+  @Test
+  void testSingleDeviceMessageDeliveryNotAllowed() throws Exception {
+    doThrow(MessageDeliveryNotAllowedException.class)
+        .when(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
+
+    try (final Response response =
+        resources.getJerseyTest()
+            .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
+            .request()
+            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
+            .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
+                    IncomingMessageList.class),
+                MediaType.APPLICATION_JSON_TYPE))) {
+
+      assertThat(response.getStatus(), is(equalTo(503)));
+    }
   }
 
   @Test
   void testSendBadAuth() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response", response.getStatus(), is(equalTo(401)));
+      assertThat("Good Response", response.getStatus(), is(equalTo(401)));
+    }
   }
 
   @Test
   void testMultiDeviceMissing() throws Exception {
-    Response response =
+    doThrow(new MismatchedDevicesException(new MismatchedDevices(Set.of((byte) 2, (byte) 3), Collections.emptySet(), Collections.emptySet())))
+        .when(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
+
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(409)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(409)));
 
-    assertThat("Good Response Body",
-               asJson(response.readEntity(MismatchedDevices.class)),
-               is(equalTo(jsonFixture("fixtures/missing_device_response.json"))));
-
-    verifyNoMoreInteractions(messageSender);
+      assertThat("Good Response Body",
+          asJson(response.readEntity(MismatchedDevicesResponse.class)),
+          is(equalTo(jsonFixture("fixtures/missing_device_response.json"))));
+    }
   }
 
   @Test
   void testMultiDeviceExtra() throws Exception {
-    Response response =
+    doThrow(new MismatchedDevicesException(new MismatchedDevices(Set.of((byte) 2), Set.of((byte) 4), Collections.emptySet())))
+        .when(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
+
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_extra_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(409)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(409)));
 
-    assertThat("Good Response Body",
-               asJson(response.readEntity(MismatchedDevices.class)),
-               is(equalTo(jsonFixture("fixtures/missing_device_response2.json"))));
-
-    verifyNoMoreInteractions(messageSender);
+      assertThat("Good Response Body",
+          asJson(response.readEntity(MismatchedDevicesResponse.class)),
+          is(equalTo(jsonFixture("fixtures/missing_device_response2.json"))));
+    }
   }
 
   @Test
   void testMultiDeviceDuplicate() throws Exception {
-    Response response = resources.getJerseyTest()
+    try (final Response response = resources.getJerseyTest()
         .target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
         .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_duplicate_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(422)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(422)));
 
-    verifyNoMoreInteractions(messageSender);
+      verifyNoMoreInteractions(messageSender);
+    }
   }
 
   @Test
   void testMultiDevice() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_multi_device.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
 
-    final ArgumentCaptor<Envelope> envelopeCaptor = ArgumentCaptor.forClass(Envelope.class);
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> envelopeCaptor =
+          ArgumentCaptor.forClass(Map.class);
 
-    verify(messageSender, times(2)).sendMessage(any(Account.class), any(Device.class), envelopeCaptor.capture(), eq(false));
+      verify(messageSender).sendMessages(any(Account.class), any(), envelopeCaptor.capture(), any(), eq(Optional.empty()), any());
 
-    envelopeCaptor.getAllValues().forEach(envelope -> assertTrue(envelope.getUrgent()));
+      assertEquals(3, envelopeCaptor.getValue().size());
+
+      envelopeCaptor.getValue().values().forEach(envelope -> assertTrue(envelope.getUrgent()));
+    }
   }
 
   @Test
   void testMultiDeviceNotUrgent() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_multi_device_not_urgent.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
 
-    final ArgumentCaptor<Envelope> envelopeCaptor = ArgumentCaptor.forClass(Envelope.class);
+      @SuppressWarnings("unchecked") final ArgumentCaptor<Map<Byte, Envelope>> envelopeCaptor =
+          ArgumentCaptor.forClass(Map.class);
 
-    verify(messageSender, times(2)).sendMessage(any(Account.class), any(Device.class), envelopeCaptor.capture(), eq(false));
+      verify(messageSender).sendMessages(any(Account.class), any(), envelopeCaptor.capture(), any(), eq(Optional.empty()), any());
 
-    envelopeCaptor.getAllValues().forEach(envelope -> assertFalse(envelope.getUrgent()));
+      assertEquals(3, envelopeCaptor.getValue().size());
+
+      envelopeCaptor.getValue().values().forEach(envelope -> assertFalse(envelope.getUrgent()));
+    }
   }
 
   @Test
   void testMultiDeviceByPni() throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/PNI:%s", MULTI_DEVICE_PNI))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_multi_device_pni.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(200)));
 
-    verify(messageSender, times(2)).sendMessage(any(Account.class), any(Device.class), any(Envelope.class), eq(false));
+      verify(messageSender).sendMessages(any(Account.class),
+          any(),
+          argThat(messagesByDeviceId -> messagesByDeviceId.size() == 3),
+          any(),
+          eq(Optional.empty()),
+          any());
+    }
   }
 
   @Test
   void testRegistrationIdMismatch() throws Exception {
-    Response response =
+    doThrow(new MismatchedDevicesException(new MismatchedDevices(Collections.emptySet(), Collections.emptySet(), Set.of((byte) 2))))
+        .when(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
+
+    try (final Response response =
         resources.getJerseyTest().target(String.format("/v1/messages/%s", MULTI_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_registration_id.json"),
                     IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(410)));
+      assertThat("Good Response Code", response.getStatus(), is(equalTo(410)));
 
-    assertThat("Good Response Body",
-               asJson(response.readEntity(StaleDevices.class)),
-               is(equalTo(jsonFixture("fixtures/mismatched_registration_id.json"))));
-
-    verifyNoMoreInteractions(messageSender);
-  }
-
-  @ParameterizedTest
-  @MethodSource
-  void testGetMessages(boolean receiveStories) {
-
-    final long timestampOne = 313377;
-    final long timestampTwo = 313388;
-
-    final UUID messageGuidOne = UUID.randomUUID();
-    final UUID messageGuidTwo = UUID.randomUUID();
-    final UUID sourceUuid = UUID.randomUUID();
-
-    final UUID updatedPniOne = UUID.randomUUID();
-
-    List<Envelope> envelopes = List.of(
-        generateEnvelope(messageGuidOne, Envelope.Type.CIPHERTEXT_VALUE, timestampOne, sourceUuid, (byte) 2,
-            AuthHelper.VALID_UUID, updatedPniOne, "hi there".getBytes(), 0, false),
-        generateEnvelope(messageGuidTwo, Envelope.Type.SERVER_DELIVERY_RECEIPT_VALUE, timestampTwo, sourceUuid,
-            (byte) 2,
-            AuthHelper.VALID_UUID, null, null, 0, true)
-    );
-
-    when(messagesManager.getMessagesForDevice(eq(AuthHelper.VALID_UUID), eq((byte) 1), anyBoolean()))
-        .thenReturn(Mono.just(new Pair<>(envelopes, false)));
-
-    final String userAgent = "Test-UA";
-
-    OutgoingMessageEntityList response =
-        resources.getJerseyTest().target("/v1/messages/")
-            .request()
-            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .header(Stories.X_SIGNAL_RECEIVE_STORIES, receiveStories ? "true" : "false")
-            .header(HttpHeaders.USER_AGENT, userAgent)
-            .accept(MediaType.APPLICATION_JSON_TYPE)
-            .get(OutgoingMessageEntityList.class);
-
-    List<OutgoingMessageEntity> messages = response.messages();
-    int expectedSize = receiveStories ? 2 : 1;
-    assertEquals(expectedSize, messages.size());
-
-    OutgoingMessageEntity first = messages.get(0);
-    assertEquals(first.timestamp(), timestampOne);
-    assertEquals(first.guid(), messageGuidOne);
-    assertEquals(first.sourceUuid().uuid(), sourceUuid);
-    assertEquals(updatedPniOne, first.updatedPni());
-
-    if (receiveStories) {
-      OutgoingMessageEntity second = messages.get(1);
-      assertEquals(second.timestamp(), timestampTwo);
-      assertEquals(second.guid(), messageGuidTwo);
-      assertEquals(second.sourceUuid().uuid(), sourceUuid);
-      assertNull(second.updatedPni());
+      assertThat("Good Response Body",
+          asJson(response.readEntity(StaleDevicesResponse.class)),
+          is(equalTo(jsonFixture("fixtures/mismatched_registration_id.json"))));
     }
-
-    verify(pushNotificationManager).handleMessagesRetrieved(AuthHelper.VALID_ACCOUNT, AuthHelper.VALID_DEVICE, userAgent);
-  }
-
-  private static Stream<Arguments> testGetMessages() {
-    return Stream.of(
-        Arguments.of(true),
-        Arguments.of(false)
-    );
-  }
-
-  @Test
-  void testGetMessagesBadAuth() {
-    final long timestampOne = 313377;
-    final long timestampTwo = 313388;
-
-    final List<Envelope> messages = List.of(
-        generateEnvelope(UUID.randomUUID(), Envelope.Type.CIPHERTEXT_VALUE, timestampOne, UUID.randomUUID(), (byte) 2,
-            AuthHelper.VALID_UUID, null, "hi there".getBytes(), 0),
-        generateEnvelope(UUID.randomUUID(), Envelope.Type.SERVER_DELIVERY_RECEIPT_VALUE, timestampTwo,
-            UUID.randomUUID(), (byte) 2, AuthHelper.VALID_UUID, null, null, 0)
-    );
-
-    when(messagesManager.getMessagesForDevice(eq(AuthHelper.VALID_UUID), eq((byte) 1), anyBoolean()))
-        .thenReturn(Mono.just(new Pair<>(messages, false)));
-
-    Response response =
-        resources.getJerseyTest().target("/v1/messages/")
-            .request()
-            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.INVALID_PASSWORD))
-            .accept(MediaType.APPLICATION_JSON_TYPE)
-            .get();
-
-    assertThat("Unauthorized response", response.getStatus(), is(equalTo(401)));
-  }
-
-  @Test
-  void testDeleteMessages() {
-    long timestamp = System.currentTimeMillis();
-
-    UUID sourceUuid = UUID.randomUUID();
-
-    UUID uuid1 = UUID.randomUUID();
-    when(messagesManager.delete(AuthHelper.VALID_UUID, (byte) 1, uuid1, null))
-        .thenReturn(
-            CompletableFutureTestUtil.almostCompletedFuture(Optional.of(generateEnvelope(uuid1, Envelope.Type.CIPHERTEXT_VALUE,
-                timestamp, sourceUuid, (byte) 1, AuthHelper.VALID_UUID, null, "hi".getBytes(), 0))));
-
-    UUID uuid2 = UUID.randomUUID();
-    when(messagesManager.delete(AuthHelper.VALID_UUID, (byte) 1, uuid2, null))
-        .thenReturn(
-            CompletableFutureTestUtil.almostCompletedFuture(Optional.of(generateEnvelope(
-                uuid2, Envelope.Type.SERVER_DELIVERY_RECEIPT_VALUE,
-                System.currentTimeMillis(), sourceUuid, (byte) 1, AuthHelper.VALID_UUID, null, null, 0))));
-
-    UUID uuid3 = UUID.randomUUID();
-    when(messagesManager.delete(AuthHelper.VALID_UUID, (byte) 1, uuid3, null))
-        .thenReturn(CompletableFutureTestUtil.almostCompletedFuture(Optional.empty()));
-
-    UUID uuid4 = UUID.randomUUID();
-    when(messagesManager.delete(AuthHelper.VALID_UUID, (byte) 1, uuid4, null))
-        .thenReturn(CompletableFuture.failedFuture(new RuntimeException("Oh No")));
-
-    Response response = resources.getJerseyTest()
-        .target(String.format("/v1/messages/uuid/%s", uuid1))
-        .request()
-        .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .delete();
-
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(204)));
-    verify(receiptSender).sendReceipt(eq(new AciServiceIdentifier(AuthHelper.VALID_UUID)), eq((byte) 1),
-        eq(new AciServiceIdentifier(sourceUuid)), eq(timestamp));
-
-    response = resources.getJerseyTest()
-        .target(String.format("/v1/messages/uuid/%s", uuid2))
-        .request()
-        .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .delete();
-
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(204)));
-    verifyNoMoreInteractions(receiptSender);
-
-    response = resources.getJerseyTest()
-        .target(String.format("/v1/messages/uuid/%s", uuid3))
-        .request()
-        .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .delete();
-
-    assertThat("Good Response Code", response.getStatus(), is(equalTo(204)));
-    verifyNoMoreInteractions(receiptSender);
-
-    response = resources.getJerseyTest()
-        .target(String.format("/v1/messages/uuid/%s", uuid4))
-        .request()
-        .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .delete();
-
-    assertThat("Bad Response Code", response.getStatus(), is(equalTo(500)));
-    verifyNoMoreInteractions(receiptSender);
-
-  }
-
-  @Test
-  void testReportMessageByE164() {
-
-    final String senderNumber = "+12125550001";
-    final UUID senderAci = UUID.randomUUID();
-    final UUID senderPni = UUID.randomUUID();
-    final String userAgent = "user-agent";
-    UUID messageGuid = UUID.randomUUID();
-
-    final Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(senderAci);
-    when(account.getNumber()).thenReturn(senderNumber);
-    when(account.getPhoneNumberIdentifier()).thenReturn(senderPni);
-
-    when(accountsManager.getByE164(senderNumber)).thenReturn(Optional.of(account));
-    when(accountsManager.findRecentlyDeletedAccountIdentifier(senderNumber)).thenReturn(Optional.of(senderAci));
-    when(accountsManager.getPhoneNumberIdentifier(senderNumber)).thenReturn(senderPni);
-
-    Response response =
-        resources.getJerseyTest()
-            .target(String.format("/v1/messages/report/%s/%s", senderNumber, messageGuid))
-            .request()
-            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .header(HttpHeaders.USER_AGENT, userAgent)
-            .post(null);
-
-    assertThat(response.getStatus(), is(equalTo(202)));
-
-    verify(reportMessageManager).report(Optional.of(senderNumber), Optional.of(senderAci), Optional.of(senderPni),
-        messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent);
-    verify(accountsManager, never()).findRecentlyDeletedE164(any(UUID.class));
-    verify(accountsManager, never()).getPhoneNumberIdentifier(anyString());
-
-    when(accountsManager.getByE164(senderNumber)).thenReturn(Optional.empty());
-    messageGuid = UUID.randomUUID();
-
-    response =
-        resources.getJerseyTest()
-            .target(String.format("/v1/messages/report/%s/%s", senderNumber, messageGuid))
-            .request()
-            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .header(HttpHeaders.USER_AGENT, userAgent)
-            .post(null);
-
-    assertThat(response.getStatus(), is(equalTo(202)));
-
-    verify(reportMessageManager).report(Optional.of(senderNumber), Optional.of(senderAci), Optional.of(senderPni),
-        messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent);
   }
 
   @Test
   void testReportMessageByAci() {
-
     final String senderNumber = "+12125550001";
     final UUID senderAci = UUID.randomUUID();
     final UUID senderPni = UUID.randomUUID();
@@ -768,45 +721,60 @@ class MessageControllerTest {
     UUID messageGuid = UUID.randomUUID();
 
     final Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(senderAci);
-    when(account.getNumber()).thenReturn(senderNumber);
-    when(account.getPhoneNumberIdentifier()).thenReturn(senderPni);
+    when(account.getAccountIdentifier()).thenReturn(senderAci);
+    when(account.getNumber()).thenReturn(Optional.of(senderNumber));
+    when(account.getPhoneNumberIdentifier()).thenReturn(Optional.of(senderPni));
 
-    when(accountsManager.getByAccountIdentifier(senderAci)).thenReturn(Optional.of(account));
-    when(accountsManager.findRecentlyDeletedE164(senderAci)).thenReturn(Optional.of(senderNumber));
-    when(accountsManager.getPhoneNumberIdentifier(senderNumber)).thenReturn(senderPni);
+    when(accountsManager.getByServiceIdentifier(new AciServiceIdentifier(senderAci))).thenReturn(Optional.of(account));
+    when(phoneNumberIdentifiers.getPhoneNumber(senderPni)).thenReturn(CompletableFuture.completedFuture(List.of(senderNumber)));
 
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/report/%s/%s", senderAci, messageGuid))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .header(HttpHeaders.USER_AGENT, userAgent)
-            .post(null);
+            .post(null)) {
 
-    assertThat(response.getStatus(), is(equalTo(202)));
+      assertThat(response.getStatus(), is(equalTo(202)));
 
-    verify(reportMessageManager).report(Optional.of(senderNumber), Optional.of(senderAci), Optional.of(senderPni),
-        messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent);
-    verify(accountsManager, never()).findRecentlyDeletedE164(any(UUID.class));
-    verify(accountsManager, never()).getPhoneNumberIdentifier(anyString());
+      verify(reportMessageManager).report(Optional.of(senderNumber), senderAci, Optional.of(senderPni),
+          messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent, false);
+      verify(accountsManager, never()).findRecentlyDeletedPhoneNumberIdentifier(any(UUID.class));
+      verify(phoneNumberIdentifiers, never()).getPhoneNumber(any());
+    }
+  }
+
+  @Test
+  void testReportMessageByAciDeletedAccount() {
+    final String senderNumber = "+12125550001";
+    final UUID senderAci = UUID.randomUUID();
+    final UUID senderPni = UUID.randomUUID();
+    final String userAgent = "user-agent";
+    final UUID messageGuid = UUID.randomUUID();
+
+    final Account account = mock(Account.class);
+    when(account.getAccountIdentifier()).thenReturn(senderAci);
+    when(account.getNumber()).thenReturn(Optional.of(senderNumber));
+    when(account.getPhoneNumberIdentifier()).thenReturn(Optional.of(senderPni));
 
     when(accountsManager.getByAccountIdentifier(senderAci)).thenReturn(Optional.empty());
+    when(accountsManager.findRecentlyDeletedPhoneNumberIdentifier(senderAci)).thenReturn(Optional.of(senderPni));
+    when(phoneNumberIdentifiers.getPhoneNumber(senderPni)).thenReturn(CompletableFuture.completedFuture(List.of(senderNumber)));
 
-    messageGuid = UUID.randomUUID();
-
-    response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/report/%s/%s", senderAci, messageGuid))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .header(HttpHeaders.USER_AGENT, userAgent)
-            .post(null);
+            .post(null)) {
 
-    assertThat(response.getStatus(), is(equalTo(202)));
+      assertThat(response.getStatus(), is(equalTo(202)));
 
-    verify(reportMessageManager).report(Optional.of(senderNumber), Optional.of(senderAci), Optional.of(senderPni),
-        messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent);
+      verify(reportMessageManager).report(Optional.of(senderNumber), senderAci, Optional.of(senderPni),
+          messageGuid, AuthHelper.VALID_UUID, Optional.empty(), userAgent, true);
+    }
   }
 
   @Test
@@ -818,52 +786,61 @@ class MessageControllerTest {
     UUID messageGuid = UUID.randomUUID();
 
     final Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(senderAci);
-    when(account.getNumber()).thenReturn(senderNumber);
-    when(account.getPhoneNumberIdentifier()).thenReturn(senderPni);
+    when(account.getAccountIdentifier()).thenReturn(senderAci);
+    when(account.getNumber()).thenReturn(Optional.of(senderNumber));
+    when(account.getPhoneNumberIdentifier()).thenReturn(Optional.of(senderPni));
 
-    when(accountsManager.getByAccountIdentifier(senderAci)).thenReturn(Optional.of(account));
-    when(accountsManager.findRecentlyDeletedE164(senderAci)).thenReturn(Optional.of(senderNumber));
-    when(accountsManager.getPhoneNumberIdentifier(senderNumber)).thenReturn(senderPni);
+    when(accountsManager.getByServiceIdentifier(new AciServiceIdentifier(senderAci))).thenReturn(Optional.of(account));
+    when(accountsManager.findRecentlyDeletedPhoneNumberIdentifier(senderAci)).thenReturn(Optional.of(senderPni));
+    when(phoneNumberIdentifiers.getPhoneNumber(senderPni)).thenReturn(CompletableFuture.completedFuture(List.of(senderNumber)));
 
     Entity<SpamReport> entity = Entity.entity(new SpamReport(new byte[3]), "application/json");
-    Response response =
+
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/report/%s/%s", senderAci, messageGuid))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .post(entity);
+            .post(entity)) {
 
-    assertThat(response.getStatus(), is(equalTo(202)));
-    verify(reportMessageManager).report(eq(Optional.of(senderNumber)),
-        eq(Optional.of(senderAci)),
-        eq(Optional.of(senderPni)),
-        eq(messageGuid),
-        eq(AuthHelper.VALID_UUID),
-        argThat(maybeBytes -> maybeBytes.map(bytes -> Arrays.equals(bytes, new byte[3])).orElse(false)),
-        any());
-    verify(accountsManager, never()).findRecentlyDeletedE164(any(UUID.class));
-    verify(accountsManager, never()).getPhoneNumberIdentifier(anyString());
-    when(accountsManager.getByAccountIdentifier(senderAci)).thenReturn(Optional.empty());
+      assertThat(response.getStatus(), is(equalTo(202)));
+      verify(reportMessageManager).report(eq(Optional.of(senderNumber)),
+          eq(senderAci),
+          eq(Optional.of(senderPni)),
+          eq(messageGuid),
+          eq(AuthHelper.VALID_UUID),
+          argThat(maybeBytes -> maybeBytes.map(bytes -> Arrays.equals(bytes, new byte[3])).orElse(false)),
+          any(),
+          eq(false));
+      verify(accountsManager, never()).findRecentlyDeletedPhoneNumberIdentifier(any(UUID.class));
+      verify(phoneNumberIdentifiers, never()).getPhoneNumber(any());
+    }
+
+    when(accountsManager.getByServiceIdentifier(new AciServiceIdentifier(senderAci))).thenReturn(Optional.empty());
 
     messageGuid = UUID.randomUUID();
 
-    entity = Entity.entity(new SpamReport(new byte[5]), "application/json");
-    response =
+    final byte[] reportSpamToken = new byte[5];
+
+    entity = Entity.entity(new SpamReport(reportSpamToken), "application/json");
+
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/report/%s/%s", senderAci, messageGuid))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .post(entity);
+            .post(entity)) {
 
-    assertThat(response.getStatus(), is(equalTo(202)));
-    verify(reportMessageManager).report(eq(Optional.of(senderNumber)),
-        eq(Optional.of(senderAci)),
-        eq(Optional.of(senderPni)),
-        eq(messageGuid),
-        eq(AuthHelper.VALID_UUID),
-        argThat(maybeBytes -> maybeBytes.map(bytes -> Arrays.equals(bytes, new byte[5])).orElse(false)),
-        any());
+      assertThat(response.getStatus(), is(equalTo(202)));
+      verify(reportMessageManager).report(eq(Optional.of(senderNumber)),
+          eq(senderAci),
+          eq(Optional.of(senderPni)),
+          eq(messageGuid),
+          eq(AuthHelper.VALID_UUID),
+          argThat(maybeBytes -> maybeBytes.map(bytes -> Arrays.equals(bytes, reportSpamToken)).orElse(false)),
+          any(),
+          eq(true));
+    }
   }
 
   @ParameterizedTest
@@ -876,23 +853,24 @@ class MessageControllerTest {
     UUID messageGuid = UUID.randomUUID();
 
     final Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(senderAci);
-    when(account.getNumber()).thenReturn(senderNumber);
-    when(account.getPhoneNumberIdentifier()).thenReturn(senderPni);
+    when(account.getAccountIdentifier()).thenReturn(senderAci);
+    when(account.getNumber()).thenReturn(Optional.of(senderNumber));
+    when(account.getPhoneNumberIdentifier()).thenReturn(Optional.of(senderPni));
 
     when(accountsManager.getByAccountIdentifier(senderAci)).thenReturn(Optional.of(account));
-    when(accountsManager.findRecentlyDeletedE164(senderAci)).thenReturn(Optional.of(senderNumber));
-    when(accountsManager.getPhoneNumberIdentifier(senderNumber)).thenReturn(senderPni);
+    when(accountsManager.findRecentlyDeletedPhoneNumberIdentifier(senderAci)).thenReturn(Optional.of(senderPni));
+    when(phoneNumberIdentifiers.getPhoneNumber(senderPni)).thenReturn(CompletableFuture.completedFuture(List.of(senderNumber)));
 
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/report/%s/%s", senderAci, messageGuid))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-            .post(entity);
+            .post(entity)) {
 
-    Matcher<Integer> matcher = expectOk ? is(equalTo(202)) : not(equalTo(202));
-    assertThat(response.getStatus(), matcher);
+      Matcher<Integer> matcher = expectOk ? is(equalTo(202)) : not(equalTo(202));
+      assertThat(response.getStatus(), matcher);
+    }
   }
 
   private static Stream<Arguments> testReportMessageByAciWithNullSpamReportToken() {
@@ -906,52 +884,48 @@ class MessageControllerTest {
         Arguments.of(Entity.json("null"), true),
         Arguments.of(Entity.json("{\"weird\": 123}"), true),
         Arguments.of(Entity.json("\"weirder\""), false),
-        Arguments.of(Entity.json("weirdest"), false)
+        Arguments.of(Entity.json("weirdest"), false),
+        Arguments.of(Entity.json("{\"token\":\"InvalidBase64[][][][]\"}"), false)
     );
   }
 
   @Test
-  void testValidateContentLength() throws Exception {
-    final int contentLength = Math.toIntExact(MessageController.MAX_MESSAGE_SIZE + 1);
-    final byte[] contentBytes = new byte[contentLength];
-    Arrays.fill(contentBytes, (byte) 1);
+  void testValidateContentLength()
+      throws MismatchedDevicesException, MessageTooLargeException, IOException, MessageDeliveryNotAllowedException {
+    doThrow(new MessageTooLargeException()).when(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
 
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
-            .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES))
-            .put(Entity.entity(new IncomingMessageList(
-                    List.of(new IncomingMessage(1, (byte) 1, 1, new String(contentBytes))), false, true,
-                    System.currentTimeMillis()),
-                MediaType.APPLICATION_JSON_TYPE));
+            .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
+            .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture("fixtures/current_message_single_device.json"),
+                    IncomingMessageList.class),
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    assertThat("Bad response", response.getStatus(), is(equalTo(413)));
-
-    verify(messageSender, never()).sendMessage(any(Account.class), any(Device.class), any(Envelope.class),
-        anyBoolean());
+      assertThat(response.getStatus(), is(equalTo(413)));
+    }
   }
 
   @ParameterizedTest
   @MethodSource
   void testValidateEnvelopeType(String payloadFilename, boolean expectOk) throws Exception {
-    Response response =
+    try (final Response response =
         resources.getJerseyTest()
             .target(String.format("/v1/messages/%s", SINGLE_DEVICE_UUID))
             .request()
             .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
             .header(HttpHeaders.USER_AGENT, "Test-UA")
             .put(Entity.entity(SystemMapper.jsonMapper().readValue(jsonFixture(payloadFilename), IncomingMessageList.class),
-                MediaType.APPLICATION_JSON_TYPE));
+                MediaType.APPLICATION_JSON_TYPE))) {
 
-    if (expectOk) {
-      assertEquals(200, response.getStatus());
-
-      final ArgumentCaptor<Envelope> captor = ArgumentCaptor.forClass(Envelope.class);
-      verify(messageSender).sendMessage(any(Account.class), any(Device.class), captor.capture(), eq(false));
-    } else {
-      assertEquals(400, response.getStatus());
-      verify(messageSender, never()).sendMessage(any(), any(), any(), anyBoolean());
+      if (expectOk) {
+        assertEquals(200, response.getStatus());
+        verify(messageSender).sendMessages(any(), any(), any(), any(), any(), any());
+      } else {
+        assertEquals(422, response.getStatus());
+        verify(messageSender, never()).sendMessages(any(), any(), any(), any(), any(), any());
+      }
     }
   }
 
@@ -962,746 +936,656 @@ class MessageControllerTest {
     );
   }
 
-  private record Recipient(ServiceIdentifier uuid,
-      byte deviceId,
-      int registrationId,
-      byte[] perRecipientKeyMaterial) {
-  }
+  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
+  @ParameterizedTest
+  @MethodSource
+  void sendMultiRecipientMessage(final Map<ServiceIdentifier, Account> accountsByServiceIdentifier,
+      final byte[] multiRecipientMessage,
+      final long timestamp,
+      final boolean isStory,
+      final boolean rateLimit,
+      final Optional<String> maybeAccessKey,
+      final Optional<String> maybeGroupSendToken,
+      final int expectedStatus,
+      final Set<Account> expectedResolvedAccounts,
+      final Set<ServiceIdentifier> expectedUuids404,
+      @Nullable final MultiRecipientMismatchedDevicesException mismatchedDevicesException)
+      throws MultiRecipientMismatchedDevicesException, MessageTooLargeException, MessageDeliveryNotAllowedException {
 
-  private static void writeMultiPayloadRecipient(final ByteBuffer bb, final Recipient r,
-      final boolean useExplicitIdentifier) {
-    if (useExplicitIdentifier) {
-      bb.put(r.uuid().toFixedWidthByteArray());
-    } else {
-      bb.put(UUIDUtil.toBytes(r.uuid().uuid()));
+    clock.pin(START_OF_DAY);
+
+    when(accountsManager.getByServiceIdentifierAsync(any()))
+        .thenReturn(CompletableFuture.completedFuture(Optional.empty()));
+
+    accountsByServiceIdentifier.forEach(((serviceIdentifier, account) ->
+        when(accountsManager.getByServiceIdentifierAsync(serviceIdentifier))
+            .thenReturn(CompletableFuture.completedFuture(Optional.of(account)))));
+
+    if (mismatchedDevicesException != null) {
+      doThrow(mismatchedDevicesException)
+          .when(messageSender).sendMultiRecipientMessage(any(), any(), anyLong(), anyBoolean(), anyBoolean(), anyBoolean(), any());
     }
 
-    bb.put(r.deviceId()); // device id (1 byte)
-    bb.putShort((short) r.registrationId()); // registration id (2 bytes)
-    bb.put(r.perRecipientKeyMaterial()); // key material (48 bytes)
-  }
+    final boolean ephemeral = true;
+    final boolean urgent = false;
 
-  private static void writeMultiPayloadExcludedRecipient(final ByteBuffer bb, final ServiceIdentifier id, final boolean useExplicitIdentifier) {
-    if (useExplicitIdentifier) {
-      bb.put(id.toFixedWidthByteArray());
-    } else {
-      bb.put(UUIDUtil.toBytes(id.uuid()));
-    }
-
-    bb.put((byte) 0);
-  }
-
-  private static InputStream initializeMultiPayload(final List<Recipient> recipients, final byte[] buffer, final boolean explicitIdentifiers) {
-    return initializeMultiPayload(recipients, List.of(), buffer, explicitIdentifiers, 39);
-  }
-
-  private static InputStream initializeMultiPayload(final List<Recipient> recipients, final List<ServiceIdentifier> excludedRecipients, final byte[] buffer, final boolean explicitIdentifiers) {
-    return initializeMultiPayload(recipients, excludedRecipients, buffer, explicitIdentifiers, 39);
-  }
-
-  private static InputStream initializeMultiPayload(final List<Recipient> recipients, final List<ServiceIdentifier> excludedRecipients, final byte[] buffer, final boolean explicitIdentifiers, final int payloadSize) {
-    // initialize a binary payload according to our wire format
-    ByteBuffer bb = ByteBuffer.wrap(buffer);
-    bb.order(ByteOrder.BIG_ENDIAN);
-
-    // first write the header
-    bb.put(explicitIdentifiers ? (byte) 0x23 : (byte) 0x22);  // version byte
-
-    // count varint
-    writeVarint(bb, recipients.size() + excludedRecipients.size());
-
-    recipients.forEach(recipient -> writeMultiPayloadRecipient(bb, recipient, explicitIdentifiers));
-    excludedRecipients.forEach(recipient -> writeMultiPayloadExcludedRecipient(bb, recipient, explicitIdentifiers));
-
-    // now write the actual message body (empty for now)
-    assert(payloadSize >= 32);
-    writeVarint(bb, payloadSize);
-    bb.put(new byte[payloadSize]);
-
-    // return the input stream
-    return new ByteArrayInputStream(buffer, 0, bb.position());
-  }
-
-  private static void writeVarint(ByteBuffer bb, long n) {
-    while (n >= 0x80) {
-      bb.put ((byte) (n & 0x7F | 0x80));
-      n = n >> 7;
-    }
-    bb.put((byte) (n & 0x7F));
-  }
-
-  @Test
-  void testManyRecipientMessage() throws Exception {
-    final int nRecipients = 999;
-    final int devicesPerRecipient = 5;
-    final ECKeyPair identityKeyPair = Curve.generateKeyPair();
-    final List<Recipient> recipients = new ArrayList<>();
-
-    for (int i = 0; i < nRecipients; i++) {
-      final List<Device> devices =
-          IntStream.range(1, devicesPerRecipient + 1)
-          .mapToObj(
-              d -> generateTestDevice(
-                  (byte) d, 100 + d, 10 * d, System.currentTimeMillis(),
-                  System.currentTimeMillis()))
-          .collect(Collectors.toList());
-      final UUID aci = new UUID(0L, (long) i);
-      final UUID pni = new UUID(1L, (long) i);
-      final String e164 = String.format("+1408555%04d", i);
-      final Account account = AccountsHelper.generateTestAccount(e164, aci, pni, devices, UNIDENTIFIED_ACCESS_BYTES);
-
-      when(accountsManager.getByServiceIdentifierAsync(new AciServiceIdentifier(aci)))
-          .thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
-
-      when(accountsManager.getByServiceIdentifierAsync(new PniServiceIdentifier(pni)))
-          .thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
-
-      devices.forEach(d -> recipients.add(new Recipient(new AciServiceIdentifier(aci), d.getId(), d.getRegistrationId(), new byte[48])));
-    }
-
-    byte[] buffer = new byte[1048576];
-    InputStream stream = initializeMultiPayload(recipients, buffer, true);
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
-    final Response response = resources
+    final Invocation.Builder invocationBuilder = resources
         .getJerseyTest()
         .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("story", true)
-        .queryParam("urgent", false)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .put(entity);
-
-    assertThat(response.readEntity(String.class), response.getStatus(), is(equalTo(200)));
-    verify(messageSender, times(nRecipients * devicesPerRecipient)).sendMessage(any(), any(), any(), eq(true));
-  }
-
-  // see testMultiRecipientMessageNoPni and testMultiRecipientMessagePni below for actual invocations
-  private void testMultiRecipientMessage(
-      Map<ServiceIdentifier, Map<Byte, Integer>> destinations,
-      boolean authorize,
-      boolean isStory,
-      boolean urgent,
-      boolean explicitIdentifier,
-      int expectedStatus,
-      int expectedMessagesSent) throws Exception {
-    final List<Recipient> recipients = new ArrayList<>();
-    destinations.forEach(
-        (serviceIdentifier, deviceToRegistrationId) ->
-            deviceToRegistrationId.forEach(
-                (deviceId, registrationId) ->
-                    recipients.add(new Recipient(serviceIdentifier, deviceId, registrationId, new byte[48]))));
-
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    InputStream stream = initializeMultiPayload(recipients, buffer, explicitIdentifier);
-
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
-
-    // build correct or incorrect access header
-    final String accessHeader;
-    if (authorize) {
-      final long count = destinations.keySet().stream().map(accountsManager::getByServiceIdentifier).filter(Optional::isPresent).count();
-      accessHeader = Base64.getEncoder().encodeToString(count % 2 == 1 ? UNIDENTIFIED_ACCESS_BYTES : new byte[16]);
-    } else {
-      accessHeader = "BBBBBBBBBBBBBBBBBBBBBB==";
-    }
-
-    // make the PUT request
-    Response response = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("ts", 1663798405641L)
+        .queryParam("ts", timestamp)
+        .queryParam("online", ephemeral)
         .queryParam("story", isStory)
         .queryParam("urgent", urgent)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, accessHeader)
-        .put(entity);
+        .request();
 
-    assertThat("Unexpected response", response.getStatus(), is(equalTo(expectedStatus)));
-    verify(messageSender,
-        exactly(expectedMessagesSent))
-        .sendMessage(
-            any(),
-            any(),
-            argThat(env -> env.getUrgent() == urgent && !env.hasSourceUuid() && !env.hasSourceDevice()),
-            eq(true));
-    if (expectedStatus == 200) {
-      SendMultiRecipientMessageResponse smrmr = response.readEntity(SendMultiRecipientMessageResponse.class);
-      assertThat(smrmr.uuids404(), is(empty()));
-    }
-  }
+    maybeAccessKey.ifPresent(accessKey ->
+        invocationBuilder.header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, accessKey));
 
-  @SafeVarargs
-  private static <K, V> Map<K, V> submap(Map<K, V> map, K... keys) {
-    return Arrays.stream(keys).collect(Collectors.toMap(Function.identity(), map::get));
-  }
+    maybeGroupSendToken.ifPresent(groupSendToken ->
+        invocationBuilder.header(HeaderUtils.GROUP_SEND_TOKEN, groupSendToken));
 
-  private static Map<ServiceIdentifier, Map<Byte, Integer>> multiRecipientTargetMap() {
-    return
-        Map.of(
-            SINGLE_DEVICE_ACI_ID, Map.of(SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1),
-            SINGLE_DEVICE_PNI_ID, Map.of(SINGLE_DEVICE_ID1, SINGLE_DEVICE_PNI_REG_ID1),
-            MULTI_DEVICE_ACI_ID,
-            Map.of(
-                 MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1,
-                 MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2),
-            MULTI_DEVICE_PNI_ID,
-            Map.of(
-                 MULTI_DEVICE_ID1, MULTI_DEVICE_PNI_REG_ID1,
-                 MULTI_DEVICE_ID2, MULTI_DEVICE_PNI_REG_ID2),
-            NONEXISTENT_ACI_ID, Map.of(SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1),
-            NONEXISTENT_PNI_ID, Map.of(SINGLE_DEVICE_ID1, SINGLE_DEVICE_PNI_REG_ID1)
-        );
-  }
-
-  private record MultiRecipientMessageTestCase(
-      Map<ServiceIdentifier, Map<Byte, Integer>> destinations,
-      boolean authenticated,
-      boolean story,
-      int expectedStatus,
-      int expectedSentMessages) {
-  }
-
-  @CartesianTest
-  @CartesianTest.MethodFactory("testMultiRecipientMessageNoPni")
-  void testMultiRecipientMessageNoPni(MultiRecipientMessageTestCase testCase, boolean urgent , boolean explicitIdentifier) throws Exception {
-    testMultiRecipientMessage(testCase.destinations(), testCase.authenticated(), testCase.story(), urgent, explicitIdentifier, testCase.expectedStatus(), testCase.expectedSentMessages());
-  }
-
-  @SuppressWarnings("unused")
-  private static ArgumentSets testMultiRecipientMessageNoPni() {
-    final Map<ServiceIdentifier, Map<Byte, Integer>> targets = multiRecipientTargetMap();
-    final Map<ServiceIdentifier, Map<Byte, Integer>> singleDeviceAci = submap(targets, SINGLE_DEVICE_ACI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> multiDeviceAci = submap(targets, MULTI_DEVICE_ACI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> bothAccountsAci =
-        submap(targets, SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> realAndFakeAci =
-        submap(
-            targets,
-            SINGLE_DEVICE_ACI_ID,
-            MULTI_DEVICE_ACI_ID,
-            NONEXISTENT_ACI_ID);
-
-    final boolean auth = true;
-    final boolean unauth = false;
-    final boolean story = true;
-    final boolean notStory = false;
-
-    return ArgumentSets
-        .argumentsForFirstParameter(
-            new MultiRecipientMessageTestCase(singleDeviceAci, unauth, story, 200, 1),
-            new MultiRecipientMessageTestCase(multiDeviceAci, unauth, story, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsAci, unauth, story, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeAci, unauth, story, 200, 3),
-
-            new MultiRecipientMessageTestCase(singleDeviceAci, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(multiDeviceAci, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(bothAccountsAci, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(realAndFakeAci, unauth, notStory, 404, 0),
-
-            new MultiRecipientMessageTestCase(singleDeviceAci, auth, story, 200, 1),
-            new MultiRecipientMessageTestCase(multiDeviceAci, auth, story, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsAci, auth, story, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeAci, auth, story, 200, 3),
-
-            new MultiRecipientMessageTestCase(singleDeviceAci, auth, notStory, 200, 1),
-            new MultiRecipientMessageTestCase(multiDeviceAci, auth, notStory, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsAci, auth, notStory, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeAci, auth, notStory, 404, 0))
-        .argumentsForNextParameter(false, true) // urgent
-        .argumentsForNextParameter(false, true); // explicitIdentifiers
-  }
-
-  @CartesianTest
-  @CartesianTest.MethodFactory("testMultiRecipientMessagePni")
-  void testMultiRecipientMessagePni(MultiRecipientMessageTestCase testCase, boolean urgent) throws Exception {
-    testMultiRecipientMessage(testCase.destinations(), testCase.authenticated(), testCase.story(), urgent, true, testCase.expectedStatus(), testCase.expectedSentMessages());
-  }
-
-  private static ArgumentSets testMultiRecipientMessagePni() {
-    final Map<ServiceIdentifier, Map<Byte, Integer>> targets = multiRecipientTargetMap();
-    final Map<ServiceIdentifier, Map<Byte, Integer>> singleDevicePni = submap(targets, SINGLE_DEVICE_PNI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> singleDeviceAciAndPni = submap(
-        targets, SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_PNI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> multiDevicePni = submap(targets, MULTI_DEVICE_PNI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> bothAccountsMixed =
-        submap(targets, SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_PNI_ID);
-    final Map<ServiceIdentifier, Map<Byte, Integer>> realAndFakeMixed =
-        submap(
-            targets,
-            SINGLE_DEVICE_PNI_ID,
-            MULTI_DEVICE_ACI_ID,
-            NONEXISTENT_PNI_ID);
-
-    final boolean auth = true;
-    final boolean unauth = false;
-    final boolean story = true;
-    final boolean notStory = false;
-
-    return ArgumentSets
-        .argumentsForFirstParameter(
-            new MultiRecipientMessageTestCase(singleDevicePni, unauth, story, 200, 1),
-            new MultiRecipientMessageTestCase(singleDeviceAciAndPni, unauth, story, 200, 2),
-            new MultiRecipientMessageTestCase(multiDevicePni, unauth, story, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsMixed, unauth, story, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeMixed, unauth, story, 200, 3),
-
-            new MultiRecipientMessageTestCase(singleDevicePni, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(singleDeviceAciAndPni, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(multiDevicePni, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(bothAccountsMixed, unauth, notStory, 401, 0),
-            new MultiRecipientMessageTestCase(realAndFakeMixed, unauth, notStory, 404, 0),
-
-            new MultiRecipientMessageTestCase(singleDevicePni, auth, story, 200, 1),
-            new MultiRecipientMessageTestCase(singleDeviceAciAndPni, auth, story, 200, 2),
-            new MultiRecipientMessageTestCase(multiDevicePni, auth, story, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsMixed, auth, story, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeMixed, auth, story, 200, 3),
-
-            new MultiRecipientMessageTestCase(singleDevicePni, auth, notStory, 200, 1),
-            new MultiRecipientMessageTestCase(singleDeviceAciAndPni, unauth, story, 200, 2),
-            new MultiRecipientMessageTestCase(multiDevicePni, auth, notStory, 200, 2),
-            new MultiRecipientMessageTestCase(bothAccountsMixed, auth, notStory, 200, 3),
-            new MultiRecipientMessageTestCase(realAndFakeMixed, auth, notStory, 404, 0))
-        .argumentsForNextParameter(false, true); // urgent
-  }
-
-  @ParameterizedTest
-  @MethodSource
-  void testMultiRecipientMessageWithGroupSendCredential(
-      List<ServiceIdentifier> includedRecipients,
-      List<ServiceIdentifier> excludedRecipients,
-      int expectedStatus,
-      int expectedMessagesSent) throws Exception {
-    final List<Recipient> recipients = new ArrayList<>();
-    includedRecipients.forEach(
-      serviceIdentifier -> multiRecipientTargetMap().get(serviceIdentifier).forEach(
-          (deviceId, registrationId) ->
-              recipients.add(new Recipient(serviceIdentifier, deviceId, registrationId, new byte[48]))));
-
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    InputStream stream = initializeMultiPayload(recipients, excludedRecipients, buffer, true);
-    final AciServiceIdentifier senderId = new AciServiceIdentifier(UUID.randomUUID());
-
-    Response response =  resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("ts", 1663798405641L)
-        .queryParam("story", false)
-        .queryParam("urgent", false)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.GROUP_SEND_CREDENTIAL, validGroupSendCredentialHeader(
-                senderId,
-                List.of(senderId, SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID)))
-        .put(Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE));
-
-    assertThat("Unexpected response", response.getStatus(), is(equalTo(expectedStatus)));
-    verify(messageSender,
-        exactly(expectedMessagesSent))
-        .sendMessage(
-            any(),
-            any(),
-            argThat(env -> !env.hasSourceUuid() && !env.hasSourceDevice()),
-            eq(true));
-    if (expectedStatus == 200) {
-      SendMultiRecipientMessageResponse smrmr = response.readEntity(SendMultiRecipientMessageResponse.class);
-      assertThat(smrmr.uuids404(), is(empty()));
-    }
-  }
-
-  private static Stream<Arguments> testMultiRecipientMessageWithGroupSendCredential() {
-    return Stream.of(
-        // All members present in included or excluded recipients: success, deliver to included recipients only
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID), List.of(), 200, 3),
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID), List.of(MULTI_DEVICE_ACI_ID), 200, 1),
-        Arguments.of(List.of(MULTI_DEVICE_ACI_ID), List.of(SINGLE_DEVICE_ACI_ID), 200, 2),
-
-        // No included recipients: request is bad
-        Arguments.of(List.of(), List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID), 400, 0),
-
-        // Some recipients both included and excluded: request is bad
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID), List.of(SINGLE_DEVICE_ACI_ID), 400, 0),
-
-        // Included recipient not covered by credential: forbid
-        Arguments.of(List.of(NONEXISTENT_ACI_ID), List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID), 401, 0),
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID, NONEXISTENT_ACI_ID), List.of(MULTI_DEVICE_ACI_ID), 401, 0),
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID, NONEXISTENT_ACI_ID), List.of(), 401, 0),
-
-        // Excluded recipient not covered by credential: forbid
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID, MULTI_DEVICE_ACI_ID), List.of(NONEXISTENT_ACI_ID), 401, 0),
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID), List.of(NONEXISTENT_ACI_ID, MULTI_DEVICE_ACI_ID), 401, 0),
-        Arguments.of(List.of(MULTI_DEVICE_ACI_ID), List.of(NONEXISTENT_ACI_ID, SINGLE_DEVICE_ACI_ID), 401, 0),
-
-        // Some recipients not in included or excluded list: forbid
-        Arguments.of(List.of(SINGLE_DEVICE_ACI_ID), List.of(), 401, 0),
-        Arguments.of(List.of(MULTI_DEVICE_ACI_ID), List.of(), 401, 0),
-
-        // Substituting a PNI for an ACI is not allowed
-        Arguments.of(List.of(SINGLE_DEVICE_PNI_ID, MULTI_DEVICE_ACI_ID), List.of(), 401, 0));
-  }
-
-  private String validGroupSendCredentialHeader(AciServiceIdentifier sender, List<ServiceIdentifier> allGroupMembers) throws Exception {
-    final ServerPublicParams serverPublicParams = serverSecretParams.getPublicParams();
-    final GroupMasterKey groupMasterKey = new GroupMasterKey(new byte[32]);
-    final GroupSecretParams groupSecretParams = GroupSecretParams.deriveFromMasterKey(groupMasterKey);
-    final ClientZkGroupCipher clientZkGroupCipher = new ClientZkGroupCipher(groupSecretParams);
-
-    UuidCiphertext senderCiphertext = clientZkGroupCipher.encrypt(sender.toLibsignal());
-    List<UuidCiphertext> groupCiphertexts = allGroupMembers.stream()
-        .map(ServiceIdentifier::toLibsignal)
-        .map(clientZkGroupCipher::encrypt)
-        .collect(Collectors.toList());
-    GroupSendCredentialResponse credentialResponse =
-        GroupSendCredentialResponse.issueCredential(groupCiphertexts, senderCiphertext, serverSecretParams);
-    GroupSendCredential credential =
-        credentialResponse.receive(
-            allGroupMembers.stream().map(ServiceIdentifier::toLibsignal).collect(Collectors.toList()),
-            sender.toLibsignal(),
-            serverPublicParams,
-            groupSecretParams);
-    GroupSendCredentialPresentation presentation = credential.present(serverPublicParams);
-    return Base64.getEncoder().encodeToString(presentation.serialize());
-  }
-
-  @ParameterizedTest
-  @ValueSource(booleans = {true, false})
-  void testMultiRecipientRedisBombProtection(final boolean useExplicitIdentifier) throws Exception {
-    final List<Recipient> recipients = List.of(
-        new Recipient(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, new byte[48]),
-        new Recipient(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2, new byte[48]),
-        new Recipient(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, new byte[48]));
-
-    Response response = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("ts", 1663798405641L)
-        .queryParam("story", false)
-        .queryParam("urgent", false)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "cluck cluck, i'm a parrot")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES))
-        .put(Entity.entity(initializeMultiPayload(recipients, new byte[2048], useExplicitIdentifier), MultiRecipientMessageProvider.MEDIA_TYPE));
-
-    checkBadMultiRecipientResponse(response, 400);
-  }
-
-  @ParameterizedTest
-  @ValueSource(booleans = {true, false})
-  void testMultiRecipientSizeLimit() throws Exception {
-    final List<Recipient> recipients = List.of(
-        new Recipient(SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1, new byte[48]));
-
-    Response response = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("ts", 1663798405641L)
-        .queryParam("story", false)
-        .queryParam("urgent", false)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "cluck cluck, i'm a parrot")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES))
-        .put(Entity.entity(initializeMultiPayload(recipients, List.of(), new byte[257<<10], true, 256<<10), MultiRecipientMessageProvider.MEDIA_TYPE));
-
-    checkBadMultiRecipientResponse(response, 400);
-  }
-
-  @Test
-  void testSendStoryToUnknownAccount() throws Exception {
-    String accessBytes = Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES);
-    String json = jsonFixture("fixtures/current_message_single_device.json");
-    UUID unknownUUID = UUID.randomUUID();
-    IncomingMessageList list = SystemMapper.jsonMapper().readValue(json, IncomingMessageList.class);
-    Response response =
-        resources.getJerseyTest()
-            .target(String.format("/v1/messages/%s", unknownUUID))
-            .queryParam("story", "true")
-            .request()
-            .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, accessBytes)
-            .put(Entity.entity(list, MediaType.APPLICATION_JSON_TYPE));
-
-    assertThat("200 masks unknown recipient", response.getStatus(), is(equalTo(200)));
-  }
-
-  @ParameterizedTest
-  @MethodSource
-  void testSendMultiRecipientMessageToUnknownAccounts(boolean story, boolean known, boolean useExplicitIdentifier) {
-
-    final Recipient r1;
-    if (known) {
-      r1 = new Recipient(SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1, new byte[48]);
+    if (rateLimit) {
+      when(rateLimiter.validateAsync(any(UUID.class)))
+          .thenReturn(CompletableFuture.failedFuture(new RateLimitExceededException(Duration.ofSeconds(77))));
     } else {
-      r1 = new Recipient(new AciServiceIdentifier(UUID.randomUUID()), (byte) 99, 999, new byte[48]);
+      when(rateLimiter.validateAsync(any(UUID.class)))
+          .thenReturn(CompletableFuture.completedFuture(null));
     }
 
-    Recipient r2 = new Recipient(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, new byte[48]);
-    Recipient r3 = new Recipient(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2, new byte[48]);
+    try (final Response response = invocationBuilder
+        .put(Entity.entity(multiRecipientMessage, MultiRecipientMessageProvider.MEDIA_TYPE))) {
 
-    List<Recipient> recipients = List.of(r1, r2, r3);
+      assertThat(response.getStatus(), is(equalTo(expectedStatus)));
 
-    byte[] buffer = new byte[2048];
-    InputStream stream = initializeMultiPayload(recipients, buffer, useExplicitIdentifier);
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
+      if (expectedStatus == 200) {
+        final SendMultiRecipientMessageResponse entity = response.readEntity(SendMultiRecipientMessageResponse.class);
+        assertThat(Set.copyOf(entity.uuids404()), equalTo(expectedUuids404));
+      }
 
-    // This looks weird, but there is a method to the madness.
-    // new bytes[16] is equivalent to UNIDENTIFIED_ACCESS_BYTES ^ UNIDENTIFIED_ACCESS_BYTES
-    // (i.e. we need to XOR all the access keys together)
-    String accessBytes = Base64.getEncoder().encodeToString(new byte[UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH]);
-
-    // start building the request
-    Invocation.Builder bldr = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", true)
-        .queryParam("ts", 1663798405641L)
-        .queryParam("story", story)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "Test User Agent")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, accessBytes);
-
-    // make the PUT request
-    Response response = bldr.put(entity);
-
-    if (story || known) {
-      // it's a story so we unconditionally get 200 ok
-      assertEquals(200, response.getStatus());
-    } else {
-      // unknown recipient means 404 not found
-      assertEquals(404, response.getStatus());
+      if ((expectedStatus == 200 && !expectedResolvedAccounts.isEmpty()) || mismatchedDevicesException != null) {
+        verify(messageSender).sendMultiRecipientMessage(any(),
+            argThat(resolvedRecipients ->
+                new HashSet<>(resolvedRecipients.values()).equals(expectedResolvedAccounts)),
+            anyLong(),
+            eq(isStory),
+            eq(ephemeral),
+            eq(urgent),
+            any());
+      } else {
+        verify(messageSender, never())
+            .sendMultiRecipientMessage(any(), any(), anyLong(), anyBoolean(), anyBoolean(), anyBoolean(), any());
+      }
     }
   }
 
-  private static Stream<Arguments> testSendMultiRecipientMessageToUnknownAccounts() {
-    return Stream.of(
-        Arguments.of(true, true, false),
-        Arguments.of(true, false, false),
-        Arguments.of(false, true, false),
-        Arguments.of(false, false, false),
+  private static List<Arguments> sendMultiRecipientMessage() throws Exception {
+    final UUID singleDeviceAccountAci = UUID.randomUUID();
+    final UUID singleDeviceAccountPni = UUID.randomUUID();
+    final UUID multiDeviceAccountAci = UUID.randomUUID();
+    final UUID multiDeviceAccountPni = UUID.randomUUID();
 
-        Arguments.of(true, true, true),
-        Arguments.of(true, false, true),
-        Arguments.of(false, true, true),
-        Arguments.of(false, false, true)
+    final byte[] singleDeviceAccountUak = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
+    final byte[] multiDeviceAccountUak = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
+
+    final int singleDevicePrimaryRegistrationId = 1;
+    final int multiDevicePrimaryRegistrationId = 2;
+    final int multiDeviceLinkedRegistrationId = 3;
+
+    final Device singleDeviceAccountPrimary = mock(Device.class);
+    when(singleDeviceAccountPrimary.getId()).thenReturn(Device.PRIMARY_ID);
+    when(singleDeviceAccountPrimary.getAccountRegistrationId()).thenReturn(singleDevicePrimaryRegistrationId);
+
+    final Device multiDeviceAccountPrimary = mock(Device.class);
+    when(multiDeviceAccountPrimary.getId()).thenReturn(Device.PRIMARY_ID);
+    when(multiDeviceAccountPrimary.getAccountRegistrationId()).thenReturn(multiDevicePrimaryRegistrationId);
+
+    final Device multiDeviceAccountLinked = mock(Device.class);
+    when(multiDeviceAccountLinked.getId()).thenReturn((byte) (Device.PRIMARY_ID + 1));
+    when(multiDeviceAccountLinked.getAccountRegistrationId()).thenReturn(multiDeviceLinkedRegistrationId);
+
+    final Account singleDeviceAccount = mock(Account.class);
+    when(singleDeviceAccount.getAccountIdentifier()).thenReturn(singleDeviceAccountAci);
+    when(singleDeviceAccount.getUnidentifiedAccessKey()).thenReturn(Optional.of(singleDeviceAccountUak));
+    when(singleDeviceAccount.getDevices()).thenReturn(List.of(singleDeviceAccountPrimary));
+    when(singleDeviceAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+    when(singleDeviceAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(singleDeviceAccountPrimary));
+
+    final Account multiDeviceAccount = mock(Account.class);
+    when(multiDeviceAccount.getAccountIdentifier()).thenReturn(multiDeviceAccountAci);
+    when(multiDeviceAccount.getUnidentifiedAccessKey()).thenReturn(Optional.of(multiDeviceAccountUak));
+    when(multiDeviceAccount.getDevices()).thenReturn(List.of(multiDeviceAccountPrimary, multiDeviceAccountLinked));
+    when(multiDeviceAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+    when(multiDeviceAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(multiDeviceAccountPrimary));
+    when(multiDeviceAccount.getDevice((byte) (Device.PRIMARY_ID + 1))).thenReturn(Optional.of(multiDeviceAccountLinked));
+
+    final String groupSendEndorsement = AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+        List.of(new AciServiceIdentifier(singleDeviceAccountAci), new AciServiceIdentifier(multiDeviceAccountAci)),
+        START_OF_DAY.plus(Duration.ofDays(1)));
+
+    final Map<ServiceIdentifier, Account> accountsByServiceIdentifier = Map.of(
+        new AciServiceIdentifier(singleDeviceAccountAci), singleDeviceAccount,
+        new AciServiceIdentifier(multiDeviceAccountAci), multiDeviceAccount,
+        new PniServiceIdentifier(singleDeviceAccountPni), singleDeviceAccount,
+        new PniServiceIdentifier(multiDeviceAccountPni), multiDeviceAccount);
+
+    final byte[] aciMessage = MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+        new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+        new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+        new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48])));
+
+    return List.of(
+        Arguments.argumentSet("Multi-recipient story",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Multi-recipient message with combined UAKs",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.of(Base64.getEncoder().encodeToString(UnidentifiedAccessUtil.getCombinedUnidentifiedAccessKey(List.of(singleDeviceAccount, multiDeviceAccount)))),
+            Optional.empty(),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Multi-recipient message with group send endorsement",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Incorrect combined UAK",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.of(Base64.getEncoder().encodeToString(TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH))),
+            Optional.empty(),
+            401,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Incorrect group send endorsement",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+                List.of(new AciServiceIdentifier(UUID.randomUUID())),
+                START_OF_DAY.plus(Duration.ofDays(1)))),
+            401,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        // Stories don't require credentials of any kind, but for historical reasons, we don't reject a combined UAK if
+        // provided
+        Arguments.argumentSet("Story with combined UAKs",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.of(Base64.getEncoder().encodeToString(UnidentifiedAccessUtil.getCombinedUnidentifiedAccessKey(List.of(singleDeviceAccount, multiDeviceAccount)))),
+            Optional.empty(),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Story with group send endorsement",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Conflicting credentials",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.of(Base64.getEncoder().encodeToString(UnidentifiedAccessUtil.getCombinedUnidentifiedAccessKey(List.of(singleDeviceAccount, multiDeviceAccount)))),
+            Optional.of(groupSendEndorsement),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("No credentials",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            401,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Negative timestamp",
+            accountsByServiceIdentifier,
+            aciMessage,
+            -1,
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Excessive timestamp",
+            accountsByServiceIdentifier,
+            aciMessage,
+            MessageController.MAX_TIMESTAMP + 1,
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Empty recipient list",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of()),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+                List.of(),
+                START_OF_DAY.plus(Duration.ofDays(1)))),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Story with empty recipient list",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of()),
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Duplicate recipient",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                    new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                    new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            400,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Missing account",
+            Map.of(),
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            200,
+            Collections.emptySet(),
+            Set.of(new AciServiceIdentifier(singleDeviceAccountAci), new AciServiceIdentifier(multiDeviceAccountAci)),
+            null),
+
+        Arguments.argumentSet("One missing and one existing account",
+            Map.of(new AciServiceIdentifier(singleDeviceAccountAci), singleDeviceAccount),
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            200,
+            Set.of(singleDeviceAccount),
+            Set.of(new AciServiceIdentifier(multiDeviceAccountAci)),
+            null),
+
+        Arguments.argumentSet("Missing account for story",
+            Map.of(),
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            200,
+            Collections.emptySet(),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("One missing and one existing account for story",
+            Map.of(new AciServiceIdentifier(singleDeviceAccountAci), singleDeviceAccount),
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            200,
+            Set.of(singleDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Missing device",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            409,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            new MultiRecipientMismatchedDevicesException(Map.of(new AciServiceIdentifier(multiDeviceAccountAci),
+                new MismatchedDevices(Set.of((byte) (Device.PRIMARY_ID + 1)), Collections.emptySet(), Collections.emptySet())))),
+
+        Arguments.argumentSet("Extra device",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), (byte) (Device.PRIMARY_ID + 2), multiDeviceLinkedRegistrationId + 1, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            409,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            new MultiRecipientMismatchedDevicesException(Map.of(new AciServiceIdentifier(multiDeviceAccountAci),
+                new MismatchedDevices(Collections.emptySet(), Set.of((byte) (Device.PRIMARY_ID + 2)), Collections.emptySet())))),
+
+        Arguments.argumentSet("Stale registration ID",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId + 1, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(groupSendEndorsement),
+            410,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            new MultiRecipientMismatchedDevicesException(Map.of(new AciServiceIdentifier(multiDeviceAccountAci),
+                new MismatchedDevices(Collections.emptySet(), Collections.emptySet(), Set.of((byte) (Device.PRIMARY_ID + 1)))))),
+
+        Arguments.argumentSet("Rate-limited story",
+            accountsByServiceIdentifier,
+            aciMessage,
+            clock.instant().toEpochMilli(),
+            true,
+            true,
+            Optional.empty(),
+            Optional.empty(),
+            429,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Story to PNI recipients",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new PniServiceIdentifier(singleDeviceAccountPni), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            true,
+            false,
+            Optional.empty(),
+            Optional.empty(),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Multi-recipient message to PNI recipients with UAK",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new PniServiceIdentifier(singleDeviceAccountPni), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.of(Base64.getEncoder().encodeToString(UnidentifiedAccessUtil.getCombinedUnidentifiedAccessKey(List.of(singleDeviceAccount, multiDeviceAccount)))),
+            Optional.empty(),
+            401,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null),
+
+        Arguments.argumentSet("Multi-recipient message to PNI recipients with group send endorsement",
+            accountsByServiceIdentifier,
+            MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+                new TestRecipient(new PniServiceIdentifier(singleDeviceAccountPni), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+                new TestRecipient(new PniServiceIdentifier(multiDeviceAccountPni), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48]))),
+            clock.instant().toEpochMilli(),
+            false,
+            false,
+            Optional.empty(),
+            Optional.of(AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+                List.of(new PniServiceIdentifier(singleDeviceAccountPni), new PniServiceIdentifier(multiDeviceAccountPni)),
+                START_OF_DAY.plus(Duration.ofDays(1)))),
+            200,
+            Set.of(singleDeviceAccount, multiDeviceAccount),
+            Set.of(),
+            null)
     );
   }
 
-  @ParameterizedTest
-  @MethodSource
-  void sendMultiRecipientMessageMismatchedDevices(final ServiceIdentifier serviceIdentifier)
-      throws JsonProcessingException {
+  @Test
+  void sendMultiRecipientMessageOversized() throws Exception {
 
-    final List<Recipient> recipients = List.of(
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1, new byte[48]),
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2, new byte[48]),
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID3, MULTI_DEVICE_REG_ID3, new byte[48]));
+    clock.pin(START_OF_DAY);
 
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    // InputStream stream = initializeMultiPayload(recipientUUID, buffer);
-    InputStream stream = initializeMultiPayload(recipients, buffer, true);
+    final UUID singleDeviceAccountAci = UUID.randomUUID();
+    final UUID singleDeviceAccountPni = UUID.randomUUID();
+    final UUID multiDeviceAccountAci = UUID.randomUUID();
+    final UUID multiDeviceAccountPni = UUID.randomUUID();
 
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
+    final byte[] singleDeviceAccountUak = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
+    final byte[] multiDeviceAccountUak = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
 
-    // start building the request
+    final int singleDevicePrimaryRegistrationId = 1;
+    final int multiDevicePrimaryRegistrationId = 2;
+    final int multiDeviceLinkedRegistrationId = 3;
+
+    final Device singleDeviceAccountPrimary = mock(Device.class);
+    when(singleDeviceAccountPrimary.getId()).thenReturn(Device.PRIMARY_ID);
+    when(singleDeviceAccountPrimary.getAccountRegistrationId()).thenReturn(singleDevicePrimaryRegistrationId);
+
+    final Device multiDeviceAccountPrimary = mock(Device.class);
+    when(multiDeviceAccountPrimary.getId()).thenReturn(Device.PRIMARY_ID);
+    when(multiDeviceAccountPrimary.getAccountRegistrationId()).thenReturn(multiDevicePrimaryRegistrationId);
+
+    final Device multiDeviceAccountLinked = mock(Device.class);
+    when(multiDeviceAccountLinked.getId()).thenReturn((byte) (Device.PRIMARY_ID + 1));
+    when(multiDeviceAccountLinked.getAccountRegistrationId()).thenReturn(multiDeviceLinkedRegistrationId);
+
+    final Account singleDeviceAccount = mock(Account.class);
+    when(singleDeviceAccount.getAccountIdentifier()).thenReturn(singleDeviceAccountAci);
+    when(singleDeviceAccount.getUnidentifiedAccessKey()).thenReturn(Optional.of(singleDeviceAccountUak));
+    when(singleDeviceAccount.getDevices()).thenReturn(List.of(singleDeviceAccountPrimary));
+    when(singleDeviceAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+    when(singleDeviceAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(singleDeviceAccountPrimary));
+
+    final Account multiDeviceAccount = mock(Account.class);
+    when(multiDeviceAccount.getAccountIdentifier()).thenReturn(multiDeviceAccountAci);
+    when(multiDeviceAccount.getUnidentifiedAccessKey()).thenReturn(Optional.of(multiDeviceAccountUak));
+    when(multiDeviceAccount.getDevices()).thenReturn(List.of(multiDeviceAccountPrimary, multiDeviceAccountLinked));
+    when(multiDeviceAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+    when(multiDeviceAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(multiDeviceAccountPrimary));
+    when(multiDeviceAccount.getDevice((byte) (Device.PRIMARY_ID + 1))).thenReturn(Optional.of(multiDeviceAccountLinked));
+
+    final Map<ServiceIdentifier, Account> accountsByServiceIdentifier = Map.of(
+        new AciServiceIdentifier(singleDeviceAccountAci), singleDeviceAccount,
+        new AciServiceIdentifier(multiDeviceAccountAci), multiDeviceAccount,
+        new PniServiceIdentifier(singleDeviceAccountPni), singleDeviceAccount,
+        new PniServiceIdentifier(multiDeviceAccountPni), multiDeviceAccount);
+
+    final byte[] aciMessage = MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+        new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48]),
+        new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), Device.PRIMARY_ID, multiDevicePrimaryRegistrationId, new byte[48]),
+        new TestRecipient(new AciServiceIdentifier(multiDeviceAccountAci), (byte) (Device.PRIMARY_ID + 1), multiDeviceLinkedRegistrationId, new byte[48])));
+
+    when(accountsManager.getByServiceIdentifierAsync(any()))
+        .thenReturn(CompletableFuture.completedFuture(Optional.empty()));
+
+    accountsByServiceIdentifier.forEach(((serviceIdentifier, account) ->
+        when(accountsManager.getByServiceIdentifierAsync(serviceIdentifier))
+            .thenReturn(CompletableFuture.completedFuture(Optional.of(account)))));
+
+    final boolean ephemeral = true;
+    final boolean urgent = false;
+    final boolean story = false;
+
     final Invocation.Builder invocationBuilder = resources
         .getJerseyTest()
         .target("/v1/messages/multi_recipient")
-        .queryParam("online", false)
-        .queryParam("ts", System.currentTimeMillis())
-        .queryParam("story", false)
-        .queryParam("urgent", true)
+        .queryParam("ts", clock.millis())
+        .queryParam("online", ephemeral)
+        .queryParam("story", story)
+        .queryParam("urgent", urgent)
         .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES));
+        .header(HeaderUtils.GROUP_SEND_TOKEN, AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+            List.of(new AciServiceIdentifier(singleDeviceAccountAci), new AciServiceIdentifier(multiDeviceAccountAci)),
+            START_OF_DAY.plus(Duration.ofDays(1))));
 
-    // make the PUT request
-    final Response response = invocationBuilder.put(entity);
+    when(rateLimiter.validateAsync(any(UUID.class)))
+        .thenReturn(CompletableFuture.completedFuture(null));
 
-    assertEquals(409, response.getStatus());
+    doThrow(new MessageTooLargeException())
+        .when(messageSender).sendMultiRecipientMessage(any(), any(), anyLong(), anyBoolean(), anyBoolean(), anyBoolean(), any());
 
-    final List<AccountMismatchedDevices> mismatchedDevices =
-        SystemMapper.jsonMapper().readValue(response.readEntity(String.class),
-            SystemMapper.jsonMapper().getTypeFactory().constructCollectionType(List.class, AccountMismatchedDevices.class));
+    try (final Response response = invocationBuilder
+        .put(Entity.entity(aciMessage, MultiRecipientMessageProvider.MEDIA_TYPE))) {
 
-    assertEquals(List.of(new AccountMismatchedDevices(serviceIdentifier,
-            new MismatchedDevices(Collections.emptyList(), List.of(MULTI_DEVICE_ID3)))),
-        mismatchedDevices);
-  }
-
-  private static Stream<Arguments> sendMultiRecipientMessageMismatchedDevices() {
-    return Stream.of(
-        Arguments.of(MULTI_DEVICE_ACI_ID),
-        Arguments.of(MULTI_DEVICE_PNI_ID));
-  }
-
-  @ParameterizedTest
-  @MethodSource
-  void sendMultiRecipientMessageStaleDevices(final ServiceIdentifier serviceIdentifier) throws JsonProcessingException {
-    final List<Recipient> recipients = List.of(
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID1, MULTI_DEVICE_REG_ID1 + 1, new byte[48]),
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID2, MULTI_DEVICE_REG_ID2 + 1, new byte[48]));
-
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    // InputStream stream = initializeMultiPayload(recipientUUID, buffer);
-    InputStream stream = initializeMultiPayload(recipients, buffer, true);
-
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
-
-    // start building the request
-    final Invocation.Builder invocationBuilder = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", false)
-        .queryParam("ts", System.currentTimeMillis())
-        .queryParam("story", false)
-        .queryParam("urgent", true)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES));
-
-    // make the PUT request
-    final Response response = invocationBuilder.put(entity);
-
-    assertEquals(410, response.getStatus());
-
-    final List<AccountStaleDevices> staleDevices =
-        SystemMapper.jsonMapper().readValue(response.readEntity(String.class),
-            SystemMapper.jsonMapper().getTypeFactory().constructCollectionType(List.class, AccountStaleDevices.class));
-
-    assertEquals(1, staleDevices.size());
-    assertEquals(serviceIdentifier, staleDevices.get(0).uuid());
-    assertEquals(Set.of(MULTI_DEVICE_ID1, MULTI_DEVICE_ID2),
-        new HashSet<>(staleDevices.get(0).devices().staleDevices()));
-  }
-
-  private static Stream<Arguments> sendMultiRecipientMessageStaleDevices() {
-    return Stream.of(
-        Arguments.of(MULTI_DEVICE_ACI_ID),
-        Arguments.of(MULTI_DEVICE_PNI_ID));
-  }
-
-  @ParameterizedTest
-  @MethodSource
-  void sendMultiRecipientMessage404(final ServiceIdentifier serviceIdentifier, final int regId1, final int regId2)
-      throws NotPushRegisteredException {
-
-    final List<Recipient> recipients = List.of(
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID1, regId1, new byte[48]),
-        new Recipient(serviceIdentifier, MULTI_DEVICE_ID2, regId2, new byte[48]));
-
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    // InputStream stream = initializeMultiPayload(recipientUUID, buffer);
-    InputStream stream = initializeMultiPayload(recipients, buffer, true);
-
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
-
-    // start building the request
-    final Invocation.Builder invocationBuilder = resources
-        .getJerseyTest()
-        .target("/v1/messages/multi_recipient")
-        .queryParam("online", false)
-        .queryParam("ts", System.currentTimeMillis())
-        .queryParam("story", true)
-        .queryParam("urgent", true)
-        .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES));
-
-    doThrow(NotPushRegisteredException.class)
-        .when(messageSender).sendMessage(any(), any(), any(), anyBoolean());
-
-    // make the PUT request
-    final SendMultiRecipientMessageResponse response = invocationBuilder.put(entity, SendMultiRecipientMessageResponse.class);
-
-    assertEquals(List.of(serviceIdentifier), response.uuids404());
-  }
-
-  private static Stream<Arguments> sendMultiRecipientMessage404() {
-    return Stream.of(
-        Arguments.of(MULTI_DEVICE_ACI_ID, MULTI_DEVICE_REG_ID1, MULTI_DEVICE_REG_ID2),
-        Arguments.of(MULTI_DEVICE_PNI_ID, MULTI_DEVICE_PNI_REG_ID1, MULTI_DEVICE_PNI_REG_ID2));
+      assertThat(response.getStatus(), is(equalTo(413)));
+    }
   }
 
   @Test
-  void sendMultiRecipientMessageStoryRateLimited() {
-    final List<Recipient> recipients = List.of(new Recipient(SINGLE_DEVICE_ACI_ID, SINGLE_DEVICE_ID1, SINGLE_DEVICE_REG_ID1, new byte[48]));
-    // initialize our binary payload and create an input stream
-    byte[] buffer = new byte[2048];
-    // InputStream stream = initializeMultiPayload(recipientUUID, buffer);
-    InputStream stream = initializeMultiPayload(recipients, buffer, true);
+  void sendMultiRecipientMessageMessageDeliveryNotAllowed() throws Exception {
 
-    // set up the entity to use in our PUT request
-    Entity<InputStream> entity = Entity.entity(stream, MultiRecipientMessageProvider.MEDIA_TYPE);
+    clock.pin(START_OF_DAY);
 
-    // start building the request
+    final UUID singleDeviceAccountAci = UUID.randomUUID();
+    final UUID singleDeviceAccountPni = UUID.randomUUID();
+
+    final byte[] singleDeviceAccountUak = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
+
+    final int singleDevicePrimaryRegistrationId = 1;
+
+    final Device singleDeviceAccountPrimary = mock(Device.class);
+    when(singleDeviceAccountPrimary.getId()).thenReturn(Device.PRIMARY_ID);
+    when(singleDeviceAccountPrimary.getAccountRegistrationId()).thenReturn(singleDevicePrimaryRegistrationId);
+
+    final Account singleDeviceAccount = mock(Account.class);
+    when(singleDeviceAccount.getAccountIdentifier()).thenReturn(singleDeviceAccountAci);
+    when(singleDeviceAccount.getUnidentifiedAccessKey()).thenReturn(Optional.of(singleDeviceAccountUak));
+    when(singleDeviceAccount.getDevices()).thenReturn(List.of(singleDeviceAccountPrimary));
+    when(singleDeviceAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+    when(singleDeviceAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(singleDeviceAccountPrimary));
+
+    final Map<ServiceIdentifier, Account> accountsByServiceIdentifier = Map.of(
+        new AciServiceIdentifier(singleDeviceAccountAci), singleDeviceAccount,
+        new PniServiceIdentifier(singleDeviceAccountPni), singleDeviceAccount);
+
+    final byte[] aciMessage = MultiRecipientMessageHelper.generateMultiRecipientMessage(List.of(
+        new TestRecipient(new AciServiceIdentifier(singleDeviceAccountAci), Device.PRIMARY_ID, singleDevicePrimaryRegistrationId, new byte[48])));
+
+    when(accountsManager.getByServiceIdentifierAsync(any()))
+        .thenReturn(CompletableFuture.completedFuture(Optional.empty()));
+
+    accountsByServiceIdentifier.forEach(((serviceIdentifier, account) ->
+        when(accountsManager.getByServiceIdentifierAsync(serviceIdentifier))
+            .thenReturn(CompletableFuture.completedFuture(Optional.of(account)))));
+
+    final boolean ephemeral = true;
+    final boolean urgent = false;
+    final boolean story = false;
+
     final Invocation.Builder invocationBuilder = resources
         .getJerseyTest()
         .target("/v1/messages/multi_recipient")
-        .queryParam("online", false)
-        .queryParam("ts", System.currentTimeMillis())
-        .queryParam("story", true)
-        .queryParam("urgent", true)
+        .queryParam("ts", clock.millis())
+        .queryParam("online", ephemeral)
+        .queryParam("story", story)
+        .queryParam("urgent", urgent)
         .request()
-        .header(HttpHeaders.USER_AGENT, "FIXME")
-        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, Base64.getEncoder().encodeToString(UNIDENTIFIED_ACCESS_BYTES));
+        .header(HeaderUtils.GROUP_SEND_TOKEN, AuthHelper.validGroupSendTokenHeader(serverSecretParams,
+            List.of(new AciServiceIdentifier(singleDeviceAccountAci)),
+            START_OF_DAY.plus(Duration.ofDays(1))));
 
     when(rateLimiter.validateAsync(any(UUID.class)))
-        .thenReturn(CompletableFuture.failedFuture(new RateLimitExceededException(Duration.ofSeconds(77), true)));
+        .thenReturn(CompletableFuture.completedFuture(null));
 
-    try (final Response response = invocationBuilder.put(entity)) {
-      assertEquals(413, response.getStatus());
+    doThrow(MessageDeliveryNotAllowedException.class)
+        .when(messageSender).sendMultiRecipientMessage(any(), any(), anyLong(), anyBoolean(), anyBoolean(), anyBoolean(), any());
+
+    try (final Response response = invocationBuilder
+        .put(Entity.entity(aciMessage, MultiRecipientMessageProvider.MEDIA_TYPE))) {
+
+      assertThat(response.getStatus(), is(equalTo(503)));
     }
   }
-
-  private void checkBadMultiRecipientResponse(Response response, int expectedCode) throws Exception {
-    assertThat("Unexpected response", response.getStatus(), is(equalTo(expectedCode)));
-    verify(messageSender, never()).sendMessage(any(), any(), any(), anyBoolean());
-  }
-
-  private static Envelope generateEnvelope(UUID guid, int type, long timestamp, UUID sourceUuid,
-      byte sourceDevice, UUID destinationUuid, UUID updatedPni, byte[] content, long serverTimestamp) {
-    return generateEnvelope(guid, type, timestamp, sourceUuid, sourceDevice, destinationUuid, updatedPni, content, serverTimestamp, false);
-  }
-
-  private static Envelope generateEnvelope(UUID guid, int type, long timestamp, UUID sourceUuid,
-      byte sourceDevice, UUID destinationUuid, UUID updatedPni, byte[] content, long serverTimestamp, boolean story) {
-
-    final MessageProtos.Envelope.Builder builder = MessageProtos.Envelope.newBuilder()
-        .setType(MessageProtos.Envelope.Type.forNumber(type))
-        .setTimestamp(timestamp)
-        .setServerTimestamp(serverTimestamp)
-        .setDestinationUuid(destinationUuid.toString())
-        .setStory(story)
-        .setServerGuid(guid.toString());
-
-    if (sourceUuid != null) {
-      builder.setSourceUuid(sourceUuid.toString());
-      builder.setSourceDevice(sourceDevice);
-    }
-
-    if (content != null) {
-      builder.setContent(ByteString.copyFrom(content));
-    }
-
-    if (updatedPni != null) {
-      builder.setUpdatedPni(updatedPni.toString());
-    }
-
-    return builder.build();
-  }
-
 }

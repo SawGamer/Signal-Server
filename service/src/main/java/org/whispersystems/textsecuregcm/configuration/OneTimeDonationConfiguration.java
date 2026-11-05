@@ -5,12 +5,12 @@
 
 package org.whispersystems.textsecuregcm.configuration;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Positive;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Map;
-import javax.validation.Valid;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.Positive;
 
 /**
  * @param boost      configuration for individual donations
@@ -24,10 +24,9 @@ public record OneTimeDonationConfiguration(@Valid ExpiringLevelConfiguration boo
 
   /**
    * @param badge      the numeric donation level ID
-   * @param level      the badge ID associated with the level
    * @param expiration the duration after which the level expires
    */
-  public record ExpiringLevelConfiguration(@NotEmpty String badge, @Positive long level, Duration expiration) {
+  public record ExpiringLevelConfiguration(@NotEmpty String badge, Duration expiration) {
 
   }
 }

@@ -9,62 +9,66 @@ import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
 import com.google.common.base.Preconditions;
 import io.dropwizard.auth.Auth;
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tags;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import io.vavr.Tuple;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.NotAuthorizedException;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.NotAuthorizedException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.ProcessingException;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
+import org.glassfish.jersey.server.ManagedAsync;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.zkgroup.InvalidInputException;
+import org.signal.libsignal.zkgroup.ServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendDerivedKeyPair;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendFullToken;
 import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredentialResponse;
+import org.signal.libsignal.zkgroup.profiles.ProfileKeyCommitment;
+import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredentialRequest;
 import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.asn.AsnInfoProvider;
 import org.whispersystems.textsecuregcm.auth.Anonymous;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.auth.GroupSendTokenHeader;
 import org.whispersystems.textsecuregcm.auth.OptionalAccess;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessChecksum;
 import org.whispersystems.textsecuregcm.badges.ProfileBadgeConverter;
@@ -75,121 +79,126 @@ import org.whispersystems.textsecuregcm.entities.BaseProfileResponse;
 import org.whispersystems.textsecuregcm.entities.BatchIdentityCheckRequest;
 import org.whispersystems.textsecuregcm.entities.BatchIdentityCheckResponse;
 import org.whispersystems.textsecuregcm.entities.CreateProfileRequest;
-import org.whispersystems.textsecuregcm.entities.CredentialProfileResponse;
 import org.whispersystems.textsecuregcm.entities.ExpiringProfileKeyCredentialProfileResponse;
 import org.whispersystems.textsecuregcm.entities.ProfileAvatarUploadAttributes;
-import org.whispersystems.textsecuregcm.entities.UserCapabilities;
 import org.whispersystems.textsecuregcm.entities.VersionedProfileResponse;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
+import org.whispersystems.textsecuregcm.limits.RateLimitedByIp;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountBadge;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
-import org.whispersystems.textsecuregcm.storage.VersionedProfile;
+import org.whispersystems.textsecuregcm.storage.VersionedProfileV1;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.textsecuregcm.util.ProfileHelper;
 import org.whispersystems.textsecuregcm.util.Util;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 
 @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 @Path("/v1/profile")
 @Tag(name = "Profile")
 public class ProfileController {
-  private final Logger logger = LoggerFactory.getLogger(ProfileController.class);
   private final Clock clock;
-  private final RateLimiters     rateLimiters;
-  private final ProfilesManager  profilesManager;
-  private final AccountsManager  accountsManager;
+  private final RateLimiters rateLimiters;
+  private final ProfilesManager profilesManager;
+  private final AccountsManager accountsManager;
+  private final Supplier<AsnInfoProvider> asnInfoProviderSupplier;
   private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
   private final ProfileBadgeConverter profileBadgeConverter;
   private final Map<String, BadgeConfiguration> badgeConfigurationMap;
 
-  private final PolicySigner              policySigner;
-  private final PostPolicyGenerator       policyGenerator;
+  private final PostPolicyGenerator policyGenerator;
+  private final ServerSecretParams serverSecretParams;
   private final ServerZkProfileOperations zkProfileOperations;
-
-  private final S3Client            s3client;
-  private final String              bucket;
 
   private final Executor batchIdentityCheckExecutor;
 
   private static final String EXPIRING_PROFILE_KEY_CREDENTIAL_TYPE = "expiringProfileKey";
 
-  private static final Counter VERSION_NOT_FOUND_COUNTER = Metrics.counter(name(ProfileController.class, "versionNotFound"));
-  private static final String INVALID_ACCEPT_LANGUAGE_COUNTER_NAME = name(ProfileController.class, "invalidAcceptLanguage");
+  private static final String VERSION_NOT_FOUND_COUNTER_NAME = name(ProfileController.class, "versionNotFound");
+  private static final String DUPLICATE_AUTHENTICATION_COUNTER_NAME = name(ProfileController.class, "duplicateAuthentication");
 
   public ProfileController(
-      Clock clock,
-      RateLimiters rateLimiters,
-      AccountsManager accountsManager,
-      ProfilesManager profilesManager,
-      DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
-      ProfileBadgeConverter profileBadgeConverter,
-      BadgesConfiguration badgesConfiguration,
-      S3Client s3client,
-      PostPolicyGenerator policyGenerator,
-      PolicySigner policySigner,
-      String bucket,
-      ServerZkProfileOperations zkProfileOperations,
-      Executor batchIdentityCheckExecutor) {
+      final Clock clock,
+      final RateLimiters rateLimiters,
+      final AccountsManager accountsManager,
+      final ProfilesManager profilesManager,
+      final Supplier<AsnInfoProvider> asnInfoProviderSupplier,
+      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
+      final ProfileBadgeConverter profileBadgeConverter,
+      final BadgesConfiguration badgesConfiguration,
+      final PostPolicyGenerator policyGenerator,
+      final ServerSecretParams serverSecretParams,
+      final ServerZkProfileOperations zkProfileOperations,
+      final Executor batchIdentityCheckExecutor) {
     this.clock = clock;
-    this.rateLimiters        = rateLimiters;
-    this.accountsManager     = accountsManager;
-    this.profilesManager     = profilesManager;
+    this.rateLimiters = rateLimiters;
+    this.accountsManager = accountsManager;
+    this.profilesManager = profilesManager;
+    this.asnInfoProviderSupplier = asnInfoProviderSupplier;
     this.dynamicConfigurationManager = dynamicConfigurationManager;
     this.profileBadgeConverter = profileBadgeConverter;
-    this.badgeConfigurationMap = badgesConfiguration.getBadges().stream().collect(Collectors.toMap(
-        BadgeConfiguration::getId, Function.identity()));
+    this.badgeConfigurationMap = badgesConfiguration.getBadges().stream()
+        .collect(Collectors.toMap(BadgeConfiguration::getId, Function.identity()));
+    this.serverSecretParams = serverSecretParams;
     this.zkProfileOperations = zkProfileOperations;
-    this.bucket              = bucket;
-    this.s3client            = s3client;
-    this.policyGenerator     = policyGenerator;
-    this.policySigner        = policySigner;
+    this.policyGenerator = policyGenerator;
     this.batchIdentityCheckExecutor = Preconditions.checkNotNull(batchIdentityCheckExecutor);
   }
 
   @PUT
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
-  public Response setProfile(@Auth AuthenticatedAccount auth, @NotNull @Valid CreateProfileRequest request) {
+  @Operation(
+      summary = "Update profile",
+      description = "Updates an account’s profile. Must be authenticated.")
+  @ApiResponse(responseCode = "200", description = "The profile was updated successfully.",
+      content = @Content(schema = @Schema(
+          implementation = ProfileAvatarUploadAttributes.class,
+          description = "If the request changed the avatar, the response body contains an upload form.")))
+  @ApiResponse(responseCode = "400", description = "Invalid create profile request.")
+  @ApiResponse(responseCode = "401", description = "Account authentication check failed.")
+  @ApiResponse(responseCode = "403", description = "The request contained a payment address, but payments are not supported in the region of the account’s phone number or the caller's ASN if the account does not have a phone number.")
+  @ApiResponse(responseCode = "412", description = "The requesting account has the profiles_v2 capability")
+  @ApiResponse(responseCode = "422", description = "Invalid request format")
+  @ManagedAsync
+  public Response setProfile(@Auth AuthenticatedDevice auth,
+      @NotNull @Valid CreateProfileRequest request,
+      @Context final ContainerRequestContext requestContext) {
 
-    final Optional<VersionedProfile> currentProfile = profilesManager.get(auth.getAccount().getUuid(),
-        request.version());
+    final Account account = accountsManager.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED));
 
-    if (request.paymentAddress() != null && request.paymentAddress().length != 0) {
-      final boolean hasDisallowedPrefix =
-          dynamicConfigurationManager.getConfiguration().getPaymentsConfiguration().getDisallowedPrefixes().stream()
-              .anyMatch(prefix -> auth.getAccount().getNumber().startsWith(prefix));
-
-      if (hasDisallowedPrefix && currentProfile.map(VersionedProfile::paymentAddress).isEmpty()) {
-        return Response.status(Response.Status.FORBIDDEN).build();
-      }
+    if (account.hasCapability(DeviceCapability.PROFILES_V2)) {
+      return Response.status(Response.Status.PRECONDITION_FAILED).build();
     }
 
-    Optional<String> currentAvatar = Optional.empty();
-    if (currentProfile.isPresent() && currentProfile.get().avatar() != null && currentProfile.get().avatar()
-        .startsWith("profiles/")) {
-      currentAvatar = Optional.of(currentProfile.get().avatar());
+    final Optional<VersionedProfileV1> currentProfile =
+        profilesManager.getV1(auth.accountIdentifier(), request.version());
+
+    final String remoteAddress = (String) requestContext.getProperty(RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME);
+
+    if (request.paymentAddress() != null &&
+        request.paymentAddress().length != 0 &&
+        ProfileHelper.isPaymentAddressUpdateForbidden(account, Optional.empty(), currentProfile, remoteAddress, asnInfoProviderSupplier.get(), dynamicConfigurationManager)) {
+
+      return Response.status(Response.Status.FORBIDDEN).build();
     }
 
-    final String avatar = switch (request.getAvatarChange()) {
-      case UNCHANGED -> currentAvatar.orElse(null);
-      case CLEAR -> null;
-      case UPDATE -> ProfileHelper.generateAvatarObjectName();
-    };
+    final Optional<String> currentAvatar = ProfileHelper.getCurrentAvatar(currentProfile);
+    final String avatar = ProfileHelper.getAvatar(request.getAvatarChange(), currentAvatar);
 
-    profilesManager.set(auth.getAccount().getUuid(),
-        new VersionedProfile(
+    profilesManager.setV1(auth.accountIdentifier(),
+        new VersionedProfileV1(
             request.version(),
             request.name(),
             avatar,
@@ -200,19 +209,17 @@ public class ProfileController {
             request.commitment().serialize()));
 
     if (request.getAvatarChange() != CreateProfileRequest.AvatarChange.UNCHANGED) {
-      currentAvatar.ifPresent(s -> s3client.deleteObject(DeleteObjectRequest.builder()
-          .bucket(bucket)
-          .key(s)
-          .build()));
+      currentAvatar.ifPresent(profilesManager::deleteAvatar);
     }
 
-    final List<AccountBadge> updatedBadges = request.badges()
-        .map(badges -> ProfileHelper.mergeBadgeIdsWithExistingAccountBadges(clock, badgeConfigurationMap, badges, auth.getAccount().getBadges()))
-        .orElseGet(() -> auth.getAccount().getBadges());
+    accountsManager.update(account.getAccountIdentifier(), a -> {
 
-    accountsManager.update(auth.getAccount(), a -> {
+      final List<AccountBadge> updatedBadges = request.badges()
+          .map(badges -> ProfileHelper.mergeBadgeIdsWithExistingAccountBadges(clock, badgeConfigurationMap, badges, a.getBadges()))
+          .orElseGet(a::getBadges);
+
       a.setBadges(clock, updatedBadges);
-      a.setCurrentProfileVersion(request.version());
+      a.setCurrentProfileVersion(HexFormat.of().parseHex(request.version()));
     });
 
     if (request.getAvatarChange() == CreateProfileRequest.AvatarChange.UPDATE) {
@@ -223,45 +230,78 @@ public class ProfileController {
   }
 
   @GET
-  @Produces(MediaType.APPLICATION_JSON)
   @Path("/{identifier}/{version}")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(
+      summary = "Get versioned profile",
+      description = "Retrieves a specific version of an account's profile. Requires either authentication or an unidentified access key.")
+  @ApiResponse(responseCode = "200", description = "Profile retrieved successfully.", useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Malformed identifier")
+  @ApiResponse(responseCode = "401", description = "Not authorized to access this profile.")
+  @ApiResponse(responseCode = "404", description = "Profile or account not found.")
+  @ApiResponse(responseCode = "429", description = "Rate limit exceeded.")
+  @ManagedAsync
   public VersionedProfileResponse getProfile(
-      @Auth Optional<AuthenticatedAccount> auth,
+      @Auth Optional<AuthenticatedDevice> maybeAuthenticatedDevice,
       @HeaderParam(HeaderUtils.UNIDENTIFIED_ACCESS_KEY) Optional<Anonymous> accessKey,
       @Context ContainerRequestContext containerRequestContext,
       @PathParam("identifier") AciServiceIdentifier accountIdentifier,
-      @PathParam("version") String version)
+      @PathParam("version") String version,
+      @HeaderParam(HttpHeaders.USER_AGENT) String userAgent)
       throws RateLimitExceededException {
 
-    final Optional<Account> maybeRequester = auth.map(AuthenticatedAccount::getAccount);
-    final Account targetAccount = verifyPermissionToReceiveAccountIdentityProfile(maybeRequester, accessKey, accountIdentifier);
+    final Optional<Account> maybeRequester =
+        maybeAuthenticatedDevice.map(
+            authenticatedDevice -> accountsManager.getByAccountIdentifier(authenticatedDevice.accountIdentifier())
+                .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED)));
+
+    final Account targetAccount = verifyPermissionToReceiveProfile(maybeRequester, accessKey, accountIdentifier, "getVersionedProfile", userAgent);
 
     return buildVersionedProfileResponse(targetAccount,
         version,
-        maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getUuid(), accountIdentifier)).orElse(false),
+        maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getAccountIdentifier(), accountIdentifier)).orElse(false),
+        false,
         containerRequestContext);
   }
 
   @GET
-  @Produces(MediaType.APPLICATION_JSON)
   @Path("/{identifier}/{version}/{credentialRequest}")
-  public CredentialProfileResponse getProfile(
-      @Auth Optional<AuthenticatedAccount> auth,
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(
+      summary = "Get profile with credential",
+      description = "Retrieves a specific version of an account's profile along with an expiring profile key credential. Requires either authentication or an unidentified access key."
+  )
+  @ApiResponse(
+      responseCode = "200",
+      description = "Account found. Profile information will be limited and credential will be null if the version was not found",
+      useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Invalid credential type or credential request.")
+  @ApiResponse(responseCode = "401", description = "Not authorized to access this profile.")
+  @ApiResponse(responseCode = "404", description = "Profile or account not found.")
+  @ApiResponse(responseCode = "429", description = "Rate limit exceeded.")
+  @ManagedAsync
+  public ExpiringProfileKeyCredentialProfileResponse getProfile(
+      @Auth Optional<AuthenticatedDevice> maybeAuthenticatedDevice,
       @HeaderParam(HeaderUtils.UNIDENTIFIED_ACCESS_KEY) Optional<Anonymous> accessKey,
       @Context ContainerRequestContext containerRequestContext,
       @PathParam("identifier") AciServiceIdentifier accountIdentifier,
       @PathParam("version") String version,
       @PathParam("credentialRequest") String credentialRequest,
-      @QueryParam("credentialType") String credentialType)
+      @QueryParam("credentialType") String credentialType,
+      @HeaderParam(HttpHeaders.USER_AGENT) String userAgent)
       throws RateLimitExceededException {
 
     if (!EXPIRING_PROFILE_KEY_CREDENTIAL_TYPE.equals(credentialType)) {
       throw new BadRequestException();
     }
 
-    final Optional<Account> maybeRequester = auth.map(AuthenticatedAccount::getAccount);
-    final Account targetAccount = verifyPermissionToReceiveAccountIdentityProfile(maybeRequester, accessKey, accountIdentifier);
-    final boolean isSelf = maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getUuid(), accountIdentifier)).orElse(false);
+    final Optional<Account> maybeRequester =
+        maybeAuthenticatedDevice.map(
+            authenticatedDevice -> accountsManager.getByAccountIdentifier(authenticatedDevice.accountIdentifier())
+                .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED)));
+
+    final Account targetAccount = verifyPermissionToReceiveProfile(maybeRequester, accessKey, accountIdentifier, "credentialRequest", userAgent);
+    final boolean isSelf = maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getAccountIdentifier(), accountIdentifier)).orElse(false);
 
     return buildExpiringProfileKeyCredentialProfileResponse(targetAccount,
         version,
@@ -273,52 +313,70 @@ public class ProfileController {
   // Although clients should generally be using versioned profiles wherever possible, there are still a few lingering
   // use cases for getting profiles without a version (e.g. getting a contact's unidentified access key checksum).
   @GET
-  @Produces(MediaType.APPLICATION_JSON)
   @Path("/{identifier}")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(
+      summary = "Get unversioned profile",
+      description = "Retrieves basic profile information without a specific version. Supports ACI and PNI identifiers. Requires authentication, an unidentified access key, or a group send token.")
+  @ApiResponse(responseCode = "200", description = "Unversioned profile retrieved successfully.", useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Invalid request (e.g., multiple authorization types provided).")
+  @ApiResponse(responseCode = "401", description = "Not authorized to access this profile.")
+  @ApiResponse(responseCode = "404", description = "Account not found.")
+  @ApiResponse(responseCode = "429", description = "Rate limit exceeded.")
+  @ManagedAsync
   public BaseProfileResponse getUnversionedProfile(
-      @Auth Optional<AuthenticatedAccount> auth,
+      @Auth Optional<AuthenticatedDevice> maybeAuthenticatedDevice,
       @HeaderParam(HeaderUtils.UNIDENTIFIED_ACCESS_KEY) Optional<Anonymous> accessKey,
+      @HeaderParam(HeaderUtils.GROUP_SEND_TOKEN) Optional<GroupSendTokenHeader> groupSendToken,
       @Context ContainerRequestContext containerRequestContext,
       @HeaderParam(HttpHeaders.USER_AGENT) String userAgent,
-      @PathParam("identifier") ServiceIdentifier identifier,
-      @QueryParam("ca") boolean useCaCertificate)
+      @PathParam("identifier") ServiceIdentifier identifier)
       throws RateLimitExceededException {
 
-    final Optional<Account> maybeRequester = auth.map(AuthenticatedAccount::getAccount);
+    final Optional<Account> maybeRequester =
+        maybeAuthenticatedDevice.map(
+            authenticatedDevice -> accountsManager.getByAccountIdentifier(authenticatedDevice.accountIdentifier())
+                .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED)));
 
+    final Account targetAccount;
+    if (groupSendToken.isPresent()) {
+      if (accessKey.isPresent()) {
+        throw new BadRequestException("may not provide both group send token and unidentified access key");
+      }
+      try {
+        final GroupSendFullToken token = groupSendToken.get().token();
+        token.verify(List.of(identifier.toLibsignal()), clock.instant(), GroupSendDerivedKeyPair.forExpiration(token.getExpiration(), serverSecretParams));
+        targetAccount = accountsManager.getByServiceIdentifier(identifier).orElseThrow(NotFoundException::new);
+      } catch (VerificationFailedException e) {
+        throw new NotAuthorizedException(e);
+      }
+    } else {
+      targetAccount = verifyPermissionToReceiveProfile(
+          maybeRequester, accessKey.filter(ignored -> identifier.identityType() == IdentityType.ACI), identifier, "getUnversionedProfile", userAgent);
+    }
     return switch (identifier.identityType()) {
-      case ACI -> {
-        final AciServiceIdentifier aciServiceIdentifier = (AciServiceIdentifier) identifier;
-
-        final Account targetAccount =
-            verifyPermissionToReceiveAccountIdentityProfile(maybeRequester, accessKey, aciServiceIdentifier);
-
-        yield buildBaseProfileResponseForAccountIdentity(targetAccount,
-            maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getUuid(), aciServiceIdentifier)).orElse(false),
-            containerRequestContext);
-      }
-      case PNI -> {
-        final Optional<Account> maybeAccountByPni = accountsManager.getByPhoneNumberIdentifier(identifier.uuid());
-
-        if (maybeRequester.isEmpty()) {
-          throw new WebApplicationException(Response.Status.UNAUTHORIZED);
-        } else {
-          rateLimiters.getProfileLimiter().validate(maybeRequester.get().getUuid());
-        }
-
-        OptionalAccess.verify(maybeRequester, Optional.empty(), maybeAccountByPni);
-
-        assert maybeAccountByPni.isPresent();
-        yield buildBaseProfileResponseForPhoneNumberIdentity(maybeAccountByPni.get());
-      }
+      case ACI -> buildBaseProfileResponseForAccountIdentity(targetAccount,
+          maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getAccountIdentifier(), identifier)).orElse(false),
+          containerRequestContext);
+      case PNI -> buildBaseProfileResponseForPhoneNumberIdentity(targetAccount);
     };
   }
 
   @POST
+  @Path("/identity_check/batch")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  @Path("/identity_check/batch")
-  public CompletableFuture<BatchIdentityCheckResponse> runBatchIdentityCheck(@NotNull @Valid BatchIdentityCheckRequest request) {
+  @RateLimitedByIp(RateLimiters.For.BATCH_IDENTITY_CHECK)
+  @Operation(
+      summary = "Batch identity key check",
+      description = "Checks identity key fingerprints for multiple accounts. Returns accounts where the fingerprint does not match. Should not be authenticated.")
+  @ApiResponse(
+      responseCode = "200",
+      description = "Batch check completed successfully. Response may contain accounts with mismatched fingerprints.",
+      content = @Content(schema = @Schema(implementation = BatchIdentityCheckResponse.class)))
+  @ApiResponse(responseCode = "400", description = "Invalid request format or validation failed.")
+  @ApiResponse(responseCode = "429", description = "Rate limit exceeded.")
+  public CompletableFuture<BatchIdentityCheckResponse> runBatchIdentityCheck(@NotNull @Valid final BatchIdentityCheckRequest request) {
     return CompletableFuture.supplyAsync(() -> {
           List<BatchIdentityCheckResponse.Element> responseElements = Collections.synchronizedList(new ArrayList<>());
 
@@ -346,28 +404,35 @@ public class ProfileController {
             }, batchIdentityCheckExecutor);
           }
 
-          return Tuple.of(futures, responseElements);
-        }).thenCompose(tuple2 -> CompletableFuture.allOf(tuple2._1).thenApply((ignored) -> new BatchIdentityCheckResponse(tuple2._2)));
+      return new Pair<>(futures, responseElements);
+    }).thenCompose(futuresAndResponseElements -> CompletableFuture.allOf(futuresAndResponseElements.first())
+        .thenApply((ignored) -> new BatchIdentityCheckResponse(futuresAndResponseElements.second())));
   }
 
   private void checkFingerprintAndAdd(BatchIdentityCheckRequest.Element element,
       Collection<BatchIdentityCheckResponse.Element> responseElements, MessageDigest md) {
 
-    final ServiceIdentifier identifier = Objects.requireNonNullElse(element.uuid(), element.aci());
+    final ServiceIdentifier identifier = element.uuid();
     final Optional<Account> maybeAccount = accountsManager.getByServiceIdentifier(identifier);
 
     maybeAccount.ifPresent(account -> {
-      final IdentityKey identityKey = account.getIdentityKey(identifier.identityType());
-      if (identityKey == null) {
+      final Optional<IdentityKey> maybeIdentityKey = switch (identifier.identityType()) {
+        case ACI -> Optional.of(account.getAccountIdentityKey());
+        case PNI -> account.getPhoneNumberIdentityKey();
+      };
+
+      if (maybeIdentityKey.isEmpty()) {
         return;
       }
+
+      final IdentityKey identityKey = maybeIdentityKey.get();
 
       md.reset();
       byte[] digest = md.digest(identityKey.serialize());
       byte[] fingerprint = Util.truncate(digest, 4);
 
       if (!Arrays.equals(fingerprint, element.fingerprint())) {
-        responseElements.add(new BatchIdentityCheckResponse.Element(element.uuid(), element.aci(), identityKey));
+        responseElements.add(new BatchIdentityCheckResponse.Element(element.uuid(), identityKey));
       }
     });
   }
@@ -379,47 +444,62 @@ public class ProfileController {
       final boolean isSelf,
       final ContainerRequestContext containerRequestContext) {
 
-    final ExpiringProfileKeyCredentialResponse expiringProfileKeyCredentialResponse = profilesManager.get(account.getUuid(), version)
-        .map(profile -> {
-          final ExpiringProfileKeyCredentialResponse profileKeyCredentialResponse;
-          try {
-            profileKeyCredentialResponse = ProfileHelper.getExpiringProfileKeyCredential(HexFormat.of().parseHex(encodedCredentialRequest),
-                profile, new ServiceId.Aci(account.getUuid()), zkProfileOperations);
-          } catch (VerificationFailedException | InvalidInputException e) {
-            throw new BadRequestException(Response.status(Response.Status.BAD_REQUEST).build(), e);
-          }
-          return profileKeyCredentialResponse;
-        })
-        .orElse(null);
+    final ExpiringProfileKeyCredentialResponse expiringProfileKeyCredentialResponse;
+
+    if (account.getCurrentProfileVersion().map(v -> HexFormat.of().formatHex(v).equals(version)).orElse(false)) {
+      expiringProfileKeyCredentialResponse = profilesManager.getV1(account.getAccountIdentifier(), version)
+          .map(profile -> {
+            final ExpiringProfileKeyCredentialResponse profileKeyCredentialResponse;
+            try {
+              profileKeyCredentialResponse = ProfileHelper.getExpiringProfileKeyCredential(
+                  new ProfileKeyCredentialRequest(HexFormat.of().parseHex(encodedCredentialRequest)),
+                  new ProfileKeyCommitment(profile.commitment()), new ServiceId.Aci(account.getAccountIdentifier()),
+                  zkProfileOperations);
+            } catch (VerificationFailedException | InvalidInputException e) {
+              throw new BadRequestException(e);
+            }
+            return profileKeyCredentialResponse;
+          })
+          .orElse(null);
+    } else {
+      expiringProfileKeyCredentialResponse = null;
+    }
 
     return new ExpiringProfileKeyCredentialProfileResponse(
-        buildVersionedProfileResponse(account, version, isSelf, containerRequestContext),
+        buildVersionedProfileResponse(account, version, isSelf, true, containerRequestContext),
         expiringProfileKeyCredentialResponse);
   }
 
   private VersionedProfileResponse buildVersionedProfileResponse(final Account account,
       final String version,
       final boolean isSelf,
+      final boolean hasCredentialRequest,
       final ContainerRequestContext containerRequestContext) {
 
-    final Optional<VersionedProfile> maybeProfile = profilesManager.get(account.getUuid(), version);
+    final Optional<VersionedProfileV1> maybeProfile = profilesManager.getV1(account.getAccountIdentifier(), version);
 
     if (maybeProfile.isEmpty()) {
-      // Hypothesis: this should basically never happen since clients can't delete versions
-      VERSION_NOT_FOUND_COUNTER.increment();
+      // this can happen if an account re-registers, which includes some device-transfer scenarios
+      Metrics.counter(
+          VERSION_NOT_FOUND_COUNTER_NAME,
+          Tags.of(
+              "self", String.valueOf(isSelf),
+              "credential_request", String.valueOf(hasCredentialRequest),
+              "platform", UserAgentTagUtil.getPlatformTag(containerRequestContext.getHeaderString("User-Agent")).getValue()))
+          .increment();
     }
 
-    final byte[] name = maybeProfile.map(VersionedProfile::name).orElse(null);
-    final byte[] about = maybeProfile.map(VersionedProfile::about).orElse(null);
-    final byte[] aboutEmoji = maybeProfile.map(VersionedProfile::aboutEmoji).orElse(null);
-    final String avatar = maybeProfile.map(VersionedProfile::avatar).orElse(null);
-    final byte[] phoneNumberSharing = maybeProfile.map(VersionedProfile::phoneNumberSharing).orElse(null);
+    final byte[] name = maybeProfile.map(VersionedProfileV1::name).orElse(null);
+    final byte[] about = maybeProfile.map(VersionedProfileV1::about).orElse(null);
+    final byte[] aboutEmoji = maybeProfile.map(VersionedProfileV1::aboutEmoji).orElse(null);
+    final String avatar = maybeProfile.map(VersionedProfileV1::avatar).orElse(null);
+    final byte[] phoneNumberSharing = maybeProfile.map(VersionedProfileV1::phoneNumberSharing).orElse(null);
 
     // Allow requests where either the version matches the latest version on Account or the latest version on Account
     // is empty to read the payment address.
     final byte[] paymentAddress = maybeProfile
-        .filter(p -> account.getCurrentProfileVersion().map(v -> v.equals(version)).orElse(true))
-        .map(VersionedProfile::paymentAddress)
+        .filter(p -> account.getCurrentProfileVersion().map(v -> HexFormat.of().formatHex(v).equals(p.version())).orElse(true))
+        .map(VersionedProfileV1::paymentAddress)
         .orElse(null);
 
     return new VersionedProfileResponse(
@@ -431,39 +511,26 @@ public class ProfileController {
       final boolean isSelf,
       final ContainerRequestContext containerRequestContext) {
 
-    return new BaseProfileResponse(account.getIdentityKey(IdentityType.ACI),
+    return new BaseProfileResponse(account.getAccountIdentityKey(),
         account.getUnidentifiedAccessKey().map(UnidentifiedAccessChecksum::generateFor).orElse(null),
         account.isUnrestrictedUnidentifiedAccess(),
-        UserCapabilities.createForAccount(account),
+        getAccountCapabilities(account),
         profileBadgeConverter.convert(
-            getAcceptableLanguagesForRequest(containerRequestContext),
+            HeaderUtils.getAcceptableLanguagesForRequest(containerRequestContext),
             account.getBadges(),
             isSelf),
-        new AciServiceIdentifier(account.getUuid()));
+        new AciServiceIdentifier(account.getAccountIdentifier()));
   }
 
   private BaseProfileResponse buildBaseProfileResponseForPhoneNumberIdentity(final Account account) {
-    return new BaseProfileResponse(account.getIdentityKey(IdentityType.PNI),
+    return new BaseProfileResponse(account.getPhoneNumberIdentityKey()
+        .orElseThrow(() -> new IllegalStateException("Account retrieved by PNI does not have PNI identity key")),
         null,
         false,
-        UserCapabilities.createForAccount(account),
+        getAccountCapabilities(account),
         Collections.emptyList(),
-        new PniServiceIdentifier(account.getPhoneNumberIdentifier()));
-  }
-
-  private List<Locale> getAcceptableLanguagesForRequest(final ContainerRequestContext containerRequestContext) {
-    try {
-      return containerRequestContext.getAcceptableLanguages();
-    } catch (final ProcessingException e) {
-      final String userAgent = containerRequestContext.getHeaderString(HttpHeaders.USER_AGENT);
-      Metrics.counter(INVALID_ACCEPT_LANGUAGE_COUNTER_NAME, Tags.of(UserAgentTagUtil.getPlatformTag(userAgent))).increment();
-      logger.debug("Could not get acceptable languages; Accept-Language: {}; User-Agent: {}",
-          containerRequestContext.getHeaderString(HttpHeaders.ACCEPT_LANGUAGE),
-          userAgent,
-          e);
-
-      return List.of();
-    }
+        new PniServiceIdentifier(account.getPhoneNumberIdentifier()
+            .orElseThrow(() -> new IllegalStateException("Account retrieved by PNI does not have PNI"))));
   }
 
   /**
@@ -480,50 +547,42 @@ public class ProfileController {
    * @throws NotAuthorizedException if the requester is not authorized to receive the target account's profile or if the
    * requester was not authenticated and did not present an anonymous access key
    */
-  private Account verifyPermissionToReceiveAccountIdentityProfile(final Optional<Account> maybeRequester,
+  private Account verifyPermissionToReceiveProfile(final Optional<Account> maybeRequester,
       final Optional<Anonymous> maybeAccessKey,
-      final AciServiceIdentifier accountIdentifier) throws RateLimitExceededException {
+      final ServiceIdentifier accountIdentifier,
+      final String endpoint,
+      @Nullable final String userAgent) throws RateLimitExceededException {
 
-    if (maybeRequester.isEmpty() && maybeAccessKey.isEmpty()) {
-      throw new WebApplicationException(Response.Status.UNAUTHORIZED);
+    if (maybeRequester.isPresent() && maybeAccessKey.isPresent()) {
+      Metrics.counter(DUPLICATE_AUTHENTICATION_COUNTER_NAME,
+          Tags.of(UserAgentTagUtil.getPlatformTag(userAgent), io.micrometer.core.instrument.Tag.of("endpoint", endpoint)))
+          .increment();
     }
 
     if (maybeRequester.isPresent()) {
-      rateLimiters.getProfileLimiter().validate(maybeRequester.get().getUuid());
+      rateLimiters.getProfileLimiter().validate(maybeRequester.get().getAccountIdentifier());
     }
 
-    final Optional<Account> maybeTargetAccount = accountsManager.getByAccountIdentifier(accountIdentifier.uuid());
+    final Optional<Account> maybeTargetAccount = accountsManager.getByServiceIdentifier(accountIdentifier);
 
-    OptionalAccess.verify(maybeRequester, maybeAccessKey, maybeTargetAccount);
+    OptionalAccess.verify(maybeRequester, maybeAccessKey, maybeTargetAccount, accountIdentifier);
     assert maybeTargetAccount.isPresent();
 
     return maybeTargetAccount.get();
   }
 
-  private ProfileAvatarUploadAttributes generateAvatarUploadForm(
-      final String objectName) {
-    ZonedDateTime now = ZonedDateTime.now(clock);
-    Pair<String, String> policy = policyGenerator.createFor(now, objectName, ProfileHelper.MAX_PROFILE_AVATAR_SIZE_BYTES);
-    String signature = policySigner.getSignature(now, policy.second());
+  private ProfileAvatarUploadAttributes generateAvatarUploadForm(final String objectName) {
+    final PostPolicyGenerator.SignedPostPolicy signedPostPolicy =
+        policyGenerator.createFor(objectName, ProfileHelper.MAX_PROFILE_AVATAR_SIZE_BYTES, clock.instant());
 
-    return new ProfileAvatarUploadAttributes(objectName, policy.first(),
-        "private", "AWS4-HMAC-SHA256",
-        now.format(PostPolicyGenerator.AWS_DATE_TIME), policy.second(), signature);
+    return new ProfileAvatarUploadAttributes(objectName, signedPostPolicy.credential(),
+        PostPolicyGenerator.ACL, PostPolicyGenerator.ALGORITHM,
+        signedPostPolicy.formattedTimestamp(), signedPostPolicy.encodedPolicy(), signedPostPolicy.signature());
   }
 
-  @Nullable
-  private static byte[] decodeFromBase64(@Nullable final String input) {
-    if (input == null) {
-      return null;
-    }
-    return Base64.getDecoder().decode(input);
-  }
-
-  @Nullable
-  private static String encodeToBase64(@Nullable final byte[] input) {
-    if (input == null) {
-      return null;
-    }
-    return Base64.getEncoder().encodeToString(input);
+  private static Map<String, Boolean> getAccountCapabilities(final Account account) {
+    return Arrays.stream(DeviceCapability.values())
+        .filter(DeviceCapability::includeInLegacyProfile)
+        .collect(Collectors.toMap(DeviceCapability::getName, account::hasCapability));
   }
 }

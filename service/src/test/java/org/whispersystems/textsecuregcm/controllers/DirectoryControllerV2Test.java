@@ -15,13 +15,13 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.configuration.DirectoryV2ClientConfiguration;
+import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.util.Pair;
 
 class DirectoryControllerV2Test {
 
@@ -36,13 +36,13 @@ class DirectoryControllerV2Test {
 
     final Account account = mock(Account.class);
     final UUID uuid = UUID.fromString("11111111-1111-1111-1111-111111111111");
-    when(account.getUuid()).thenReturn(uuid);
+    when(account.getAccountIdentifier()).thenReturn(uuid);
 
-    final ExternalServiceCredentials credentials = (ExternalServiceCredentials) controller.getAuthToken(
-        new AuthenticatedAccount(() -> new Pair<>(account, mock(Device.class)))).getEntity();
+    final ExternalServiceCredentials credentials = controller.getAuthToken(
+        new AuthenticatedDevice(uuid, Device.PRIMARY_ID, Instant.now()));
 
-    assertEquals(credentials.username(), "d369bc712e2e0dd36258");
-    assertEquals(credentials.password(), "1633738643:4433b0fab41f25f79dd4");
+    assertEquals("d369bc712e2e0dd36258", credentials.username());
+    assertEquals("1633738643:4433b0fab41f25f79dd4", credentials.password());
   }
 
 }

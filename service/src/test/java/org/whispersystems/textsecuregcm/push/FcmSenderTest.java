@@ -7,7 +7,6 @@ package org.whispersystems.textsecuregcm.push;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -21,6 +20,7 @@ import com.google.firebase.messaging.FirebaseMessagingException;
 import com.google.firebase.messaging.Message;
 import com.google.firebase.messaging.MessagingErrorCode;
 import java.io.IOException;
+import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -54,7 +54,8 @@ class FcmSenderTest {
 
   @Test
   void testSendMessage() {
-    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true);
+    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true,
+        null);
 
     final SettableApiFuture<String> sendFuture = SettableApiFuture.create();
     sendFuture.set("message-id");
@@ -65,13 +66,14 @@ class FcmSenderTest {
 
     verify(firebaseMessaging).sendAsync(any(Message.class));
     assertTrue(result.accepted());
-    assertNull(result.errorCode());
+    assertTrue(result.errorCode().isEmpty());
     assertFalse(result.unregistered());
   }
 
   @Test
   void testSendMessageRejected() {
-    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true);
+    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true,
+        null);
 
     final FirebaseMessagingException invalidArgumentException = mock(FirebaseMessagingException.class);
     when(invalidArgumentException.getMessagingErrorCode()).thenReturn(MessagingErrorCode.INVALID_ARGUMENT);
@@ -85,13 +87,14 @@ class FcmSenderTest {
 
     verify(firebaseMessaging).sendAsync(any(Message.class));
     assertFalse(result.accepted());
-    assertEquals("INVALID_ARGUMENT", result.errorCode());
+    assertEquals(Optional.of("INVALID_ARGUMENT"), result.errorCode());
     assertFalse(result.unregistered());
   }
 
   @Test
   void testSendMessageUnregistered() {
-    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true);
+    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true,
+        null);
 
     final FirebaseMessagingException unregisteredException = mock(FirebaseMessagingException.class);
     when(unregisteredException.getMessagingErrorCode()).thenReturn(MessagingErrorCode.UNREGISTERED);
@@ -105,13 +108,14 @@ class FcmSenderTest {
 
     verify(firebaseMessaging).sendAsync(any(Message.class));
     assertFalse(result.accepted());
-    assertEquals("UNREGISTERED", result.errorCode());
+    assertEquals(Optional.of("UNREGISTERED"), result.errorCode());
     assertTrue(result.unregistered());
   }
 
   @Test
   void testSendMessageException() {
-    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true);
+    final PushNotification pushNotification = new PushNotification("foo", PushNotification.TokenType.FCM, PushNotification.NotificationType.NOTIFICATION, null, null, null, true,
+        null);
 
     final SettableApiFuture<String> sendFuture = SettableApiFuture.create();
     sendFuture.setException(new IOException());

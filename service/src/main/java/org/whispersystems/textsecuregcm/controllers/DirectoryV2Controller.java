@@ -6,15 +6,15 @@ package org.whispersystems.textsecuregcm.controllers;
 
 import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.auth.Auth;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import java.time.Clock;
-import java.util.UUID;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.configuration.DirectoryV2ClientConfiguration;
@@ -47,9 +47,15 @@ public class DirectoryV2Controller {
   @GET
   @Path("/auth")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getAuthToken(final @Auth AuthenticatedAccount auth) {
-    final UUID uuid = auth.getAccount().getUuid();
-    final ExternalServiceCredentials credentials = directoryServiceTokenGenerator.generateForUuid(uuid);
-    return Response.ok().entity(credentials).build();
+  @Operation(
+      summary = "Generate credentials for Contact Discovery Service",
+      description = """
+          Generate Contact Discovery Service credentials. Generated credentials have an expiration time of 24 hours\s
+          (however, the TTL is fully controlled by the server and may change even for already generated credentials).
+          """
+  )
+  @ApiResponse(responseCode = "200", description = "`JSON` with generated credentials.", useReturnTypeSchema = true)
+  public ExternalServiceCredentials getAuthToken(final @Auth AuthenticatedDevice auth) {
+    return directoryServiceTokenGenerator.generateForUuid(auth.accountIdentifier());
   }
 }

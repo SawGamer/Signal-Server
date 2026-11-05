@@ -6,6 +6,7 @@
 package org.whispersystems.textsecuregcm.util.logging;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.matches;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -21,10 +22,19 @@ import io.dropwizard.jersey.DropwizardResourceConfig;
 import io.dropwizard.jersey.jackson.JacksonMessageBodyProvider;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.lettuce.core.RedisException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.ServerErrorException;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.Principal;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -36,14 +46,10 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.core.Response;
-import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import javax.annotation.Nullable;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.UpgradeRequest;
-import org.eclipse.jetty.websocket.api.WriteCallback;
 import org.glassfish.jersey.server.ApplicationHandler;
 import org.glassfish.jersey.server.ResourceConfig;
 import org.glassfish.jersey.server.ServerProperties;
@@ -55,7 +61,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.Logger;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.mappers.CompletionExceptionMapper;
+import org.whispersystems.textsecuregcm.tests.util.TestPrincipal;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.websocket.WebSocketResourceProvider;
 import org.whispersystems.websocket.auth.WebsocketAuthValueFactoryProvider;
@@ -142,12 +150,12 @@ class LoggingUnhandledExceptionMapperTest {
     WebSocketResourceProvider<TestPrincipal> provider = createWebsocketProvider(userAgentHeader, session,
         responseFuture::complete);
 
-    provider.onWebSocketConnect(session);
+    provider.onWebSocketOpen(session);
 
     byte[] message = new ProtobufWebSocketMessageFactory()
         .createRequest(Optional.of(111L), "GET", targetPath, new LinkedList<>(), Optional.empty()).toByteArray();
 
-    provider.onWebSocketBinary(message, 0, message.length);
+    provider.onWebSocketBinary(ByteBuffer.wrap(message), Callback.NOOP);
 
     responseFuture.get(1, TimeUnit.SECONDS);
 
@@ -162,6 +170,30 @@ class LoggingUnhandledExceptionMapperTest {
 
   }
 
+  @ParameterizedTest
+  @MethodSource
+  void testBreakerExceptions(final String path, @Nullable final Boolean isBreaker, final boolean expectLog) {
+    resources.getJerseyTest()
+        .target(path)
+        .queryParam("breaker", isBreaker)
+        .request()
+        .get();
+
+    if (expectLog) {
+      verifyNoInteractions(logger);
+    } else {
+      verify(logger).error(anyString(), any(Throwable.class));
+    }
+  }
+
+  static Collection<Arguments> testBreakerExceptions() {
+    return List.of(
+        Arguments.argumentSet("redis wraps breaker", "/v1/test/redis-exception", true, true),
+        Arguments.argumentSet("redis wraps other", "/v1/test/redis-exception", false, false),
+        Arguments.argumentSet("WebApplicationException wraps breaker", "/v1/test/webapplication-exception-wraps-breaker", null, false)
+    );
+  }
+
   private WebSocketResourceProvider<TestPrincipal> createWebsocketProvider(final String userAgentHeader,
       final Session session, final Consumer<ByteBuffer> responseHandler) throws IOException {
     ResourceConfig resourceConfig = new DropwizardResourceConfig();
@@ -173,19 +205,18 @@ class LoggingUnhandledExceptionMapperTest {
 
     ApplicationHandler applicationHandler = new ApplicationHandler(resourceConfig);
     WebsocketRequestLog requestLog = mock(WebsocketRequestLog.class);
-    WebSocketResourceProvider<TestPrincipal> provider = new WebSocketResourceProvider<>("127.0.0.1", applicationHandler,
-        requestLog, new TestPrincipal("foo"), new ProtobufWebSocketMessageFactory(), Optional.empty(),
-        Duration.ofMillis(30000));
+    WebSocketResourceProvider<TestPrincipal> provider = new WebSocketResourceProvider<>("127.0.0.1",
+        RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME, 1234, applicationHandler, requestLog,
+        TestPrincipal.authenticatedTestPrincipal("foo"),
+        new ProtobufWebSocketMessageFactory(), Optional.empty(), Duration.ofMillis(30000));
 
-    RemoteEndpoint remoteEndpoint = mock(RemoteEndpoint.class);
     doAnswer(answer -> {
       responseHandler.accept(answer.getArgument(0, ByteBuffer.class));
       return null;
-    }).when(remoteEndpoint).sendBytes(any(), any(WriteCallback.class));
+    }).when(session).sendBinary(any(ByteBuffer.class), any(Callback.class));
     UpgradeRequest request = mock(UpgradeRequest.class);
 
     when(session.getUpgradeRequest()).thenReturn(request);
-    when(session.getRemote()).thenReturn(remoteEndpoint);
     when(request.getHeader(HttpHeaders.USER_AGENT)).thenReturn(userAgentHeader);
     when(request.getHeaders()).thenReturn(Map.of(HttpHeaders.USER_AGENT, List.of(userAgentHeader)));
 
@@ -199,6 +230,24 @@ class LoggingUnhandledExceptionMapperTest {
     @Path("/no-exception")
     public Response testNoException() {
       return Response.ok().build();
+    }
+
+    @GET
+    @Path("/redis-exception")
+    public Response testRedisException(@QueryParam("breaker") final boolean isBreaker) {
+      final Throwable cause = isBreaker ? CallNotPermittedException.createCallNotPermittedException(
+          CircuitBreaker.ofDefaults(LoggingUnhandledExceptionMapperTest.class.getSimpleName()))
+          : new IOException("oh no");
+
+      throw new RedisException(cause);
+    }
+
+    @GET
+    @Path("/webapplication-exception-wraps-breaker")
+    public Response testWebApplicationExceptionWrapsBreaker() {
+      throw new ServerErrorException(Response.Status.BAD_GATEWAY,
+          CallNotPermittedException.createCallNotPermittedException(
+              CircuitBreaker.ofDefaults(LoggingUnhandledExceptionMapperTest.class.getSimpleName())));
     }
 
     @GET
@@ -235,20 +284,6 @@ class LoggingUnhandledExceptionMapperTest {
     public Response testUnhandledExceptionWithPathParameter(@PathParam("parameter1") String parameter1,
         @PathParam("parameter2") String parameter2) {
       throw new RuntimeException();
-    }
-  }
-
-  public static class TestPrincipal implements Principal {
-
-    private final String name;
-
-    private TestPrincipal(String name) {
-      this.name = name;
-    }
-
-    @Override
-    public String getName() {
-      return name;
     }
   }
 }

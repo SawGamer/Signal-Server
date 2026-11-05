@@ -14,24 +14,25 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import io.dropwizard.jersey.DropwizardResourceConfig;
+import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.security.Principal;
 import java.util.Optional;
 import javax.security.auth.Subject;
+import org.eclipse.jetty.ee10.websocket.server.JettyServerUpgradeRequest;
+import org.eclipse.jetty.ee10.websocket.server.JettyServerUpgradeResponse;
 import org.eclipse.jetty.websocket.api.Session;
-import org.eclipse.jetty.websocket.api.UpgradeRequest;
-import org.eclipse.jetty.websocket.server.JettyServerUpgradeRequest;
-import org.eclipse.jetty.websocket.server.JettyServerUpgradeResponse;
-import org.eclipse.jetty.websocket.server.JettyWebSocketServletFactory;
 import org.glassfish.jersey.server.ResourceConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.whispersystems.websocket.auth.AuthenticationException;
+import org.whispersystems.websocket.auth.AuthenticatedWebSocketUpgradeFilter;
+import org.whispersystems.websocket.auth.InvalidCredentialsException;
 import org.whispersystems.websocket.auth.WebSocketAuthenticator;
-import org.whispersystems.websocket.configuration.WebSocketConfiguration;
 import org.whispersystems.websocket.setup.WebSocketEnvironment;
 
 public class WebSocketResourceProviderFactoryTest {
+
+  private static final String REMOTE_ADDRESS_PROPERTY_NAME = "org.whispersystems.websocket.test.remoteAddress";
 
   private ResourceConfig jerseyEnvironment;
   private WebSocketEnvironment<Account> environment;
@@ -52,14 +53,12 @@ public class WebSocketResourceProviderFactoryTest {
   }
 
   @Test
-  void testUnauthorized() throws AuthenticationException, IOException {
+  void testUnauthorized() throws InvalidCredentialsException, IOException {
     when(environment.getAuthenticator()).thenReturn(authenticator);
-    when(authenticator.authenticate(eq(request))).thenReturn(
-        new WebSocketAuthenticator.AuthenticationResult<>(Optional.empty(), true));
+    when(authenticator.authenticate(eq(request))).thenThrow(new InvalidCredentialsException());
     when(environment.jersey()).thenReturn(jerseyEnvironment);
 
-    WebSocketResourceProviderFactory<?> factory = new WebSocketResourceProviderFactory<>(environment, Account.class,
-        mock(WebSocketConfiguration.class));
+    WebSocketResourceProviderFactory<?> factory = new WebSocketResourceProviderFactory<>(environment, Account.class, REMOTE_ADDRESS_PROPERTY_NAME);
     Object connection = factory.createWebSocket(request, response);
 
     assertNull(connection);
@@ -68,39 +67,39 @@ public class WebSocketResourceProviderFactoryTest {
   }
 
   @Test
-  void testValidAuthorization() throws AuthenticationException {
-    Session session = mock(Session.class);
+  void testValidAuthorization() throws InvalidCredentialsException {
     Account account = new Account();
 
     when(environment.getAuthenticator()).thenReturn(authenticator);
-    when(authenticator.authenticate(eq(request))).thenReturn(
-        new WebSocketAuthenticator.AuthenticationResult<>(Optional.of(account), true));
+    when(authenticator.authenticate(eq(request)))
+        .thenReturn(Optional.of(account));
     when(environment.jersey()).thenReturn(jerseyEnvironment);
-    when(session.getUpgradeRequest()).thenReturn(mock(UpgradeRequest.class));
-
+    final HttpServletRequest httpServletRequest = mock(HttpServletRequest.class);
+    when(httpServletRequest.getAttribute(REMOTE_ADDRESS_PROPERTY_NAME)).thenReturn("127.0.0.1");
+    when(request.getHttpServletRequest()).thenReturn(httpServletRequest);
     WebSocketResourceProviderFactory<?> factory = new WebSocketResourceProviderFactory<>(environment, Account.class,
-        mock(WebSocketConfiguration.class));
+        REMOTE_ADDRESS_PROPERTY_NAME);
     Object connection = factory.createWebSocket(request, response);
 
     assertNotNull(connection);
     verifyNoMoreInteractions(response);
     verify(authenticator).authenticate(eq(request));
 
-    ((WebSocketResourceProvider<?>) connection).onWebSocketConnect(session);
+    ((WebSocketResourceProvider<?>) connection).onWebSocketOpen(mock(Session.class));
 
     assertNotNull(((WebSocketResourceProvider<?>) connection).getContext().getAuthenticated());
     assertEquals(((WebSocketResourceProvider<?>) connection).getContext().getAuthenticated(), account);
   }
 
   @Test
-  void testErrorAuthorization() throws AuthenticationException, IOException {
+  void testErrorAuthorization() throws InvalidCredentialsException, IOException {
     when(environment.getAuthenticator()).thenReturn(authenticator);
-    when(authenticator.authenticate(eq(request))).thenThrow(new AuthenticationException("database failure"));
+    when(authenticator.authenticate(eq(request))).thenThrow(new RuntimeException("database failure"));
     when(environment.jersey()).thenReturn(jerseyEnvironment);
 
     WebSocketResourceProviderFactory<Account> factory = new WebSocketResourceProviderFactory<>(environment,
         Account.class,
-        mock(WebSocketConfiguration.class));
+        REMOTE_ADDRESS_PROPERTY_NAME);
     Object connection = factory.createWebSocket(request, response);
 
     assertNull(connection);
@@ -109,16 +108,24 @@ public class WebSocketResourceProviderFactoryTest {
   }
 
   @Test
-  void testConfigure() {
-    JettyWebSocketServletFactory servletFactory = mock(JettyWebSocketServletFactory.class);
+  void testAuthenticatedWebSocketUpgradeFilter() throws InvalidCredentialsException {
+    final Account account = new Account();
+    final Optional<Account> reusableAuth = Optional.of(account);
+
+    when(environment.getAuthenticator()).thenReturn(authenticator);
+    when(authenticator.authenticate(eq(request))).thenReturn(reusableAuth);
     when(environment.jersey()).thenReturn(jerseyEnvironment);
+    final HttpServletRequest httpServletRequest = mock(HttpServletRequest.class);
+    when(httpServletRequest.getAttribute(REMOTE_ADDRESS_PROPERTY_NAME)).thenReturn("127.0.0.1");
+    when(request.getHttpServletRequest()).thenReturn(httpServletRequest);
+    final AuthenticatedWebSocketUpgradeFilter<Account> filter = mock(AuthenticatedWebSocketUpgradeFilter.class);
+    when(environment.getAuthenticatedWebSocketUpgradeFilter()).thenReturn(filter);
 
-    WebSocketResourceProviderFactory<Account> factory = new WebSocketResourceProviderFactory<>(environment,
-        Account.class,
-        mock(WebSocketConfiguration.class));
-    factory.configure(servletFactory);
+    final WebSocketResourceProviderFactory<?> factory = new WebSocketResourceProviderFactory<>(environment, Account.class,
+        REMOTE_ADDRESS_PROPERTY_NAME);
+    assertNotNull(factory.createWebSocket(request, response));
 
-    verify(servletFactory).setCreator(eq(factory));
+    verify(filter).handleAuthentication(reusableAuth, request, response);
   }
 
 
@@ -132,6 +139,7 @@ public class WebSocketResourceProviderFactoryTest {
     public boolean implies(Subject subject) {
       return false;
     }
+
   }
 
 

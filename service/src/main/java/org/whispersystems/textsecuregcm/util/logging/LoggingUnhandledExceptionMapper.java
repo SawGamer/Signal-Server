@@ -8,10 +8,13 @@ package org.whispersystems.textsecuregcm.util.logging;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HttpHeaders;
 import io.dropwizard.jersey.errors.LoggingExceptionMapper;
-import javax.inject.Provider;
-import javax.ws.rs.core.Context;
+import jakarta.inject.Provider;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.Response;
 import org.glassfish.jersey.server.ContainerRequest;
 import org.slf4j.Logger;
+import org.whispersystems.textsecuregcm.util.ExceptionUtils;
 import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
 import org.whispersystems.textsecuregcm.util.ua.UserAgent;
 import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
@@ -34,6 +37,14 @@ public class LoggingUnhandledExceptionMapper extends LoggingExceptionMapper<Thro
   }
 
   @Override
+  public Response toResponse(final Throwable exception) {
+    if (!(exception instanceof WebApplicationException) && ExceptionUtils.isBreakerOpen(exception)) {
+      return Response.status(Response.Status.SERVICE_UNAVAILABLE).build();
+    }
+    return super.toResponse(exception);
+  }
+
+  @Override
   protected String formatLogMessage(final long id, final Throwable exception) {
     String requestMethod = "unknown method";
     String userAgent = "missing";
@@ -46,7 +57,7 @@ public class LoggingUnhandledExceptionMapper extends LoggingExceptionMapper<Thro
 
       // streamline the user-agent if it is recognized
       final UserAgent ua = UserAgentUtil.parseUserAgentString(userAgent);
-      userAgent = String.format("%s %s", ua.getPlatform(), ua.getVersion());
+      userAgent = String.format("%s %s", ua.platform(), ua.version());
     } catch (final UnrecognizedUserAgentException ignored) {
 
     } catch (final Exception e) {
@@ -57,7 +68,8 @@ public class LoggingUnhandledExceptionMapper extends LoggingExceptionMapper<Thro
         super.formatLogMessage(id, exception),
         requestMethod,
         requestPath,
-        userAgent) ;
+        // Strip any control codes to avoid any weird formatting with console loggers
+        userAgent.replaceAll("\\p{Cntrl}", ""));
   }
 
 }

@@ -7,6 +7,8 @@ package org.whispersystems.websocket;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HttpHeaders;
 import com.google.protobuf.UninitializedMessageException;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -22,12 +24,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import javax.ws.rs.core.MultivaluedMap;
-import javax.ws.rs.core.Response;
-import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import java.util.stream.Collectors;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
-import org.eclipse.jetty.websocket.api.WebSocketListener;
-import org.eclipse.jetty.websocket.api.WriteCallback;
 import org.eclipse.jetty.websocket.api.exceptions.MessageTooLargeException;
 import org.glassfish.jersey.internal.MapPropertiesDelegate;
 import org.glassfish.jersey.server.ApplicationHandler;
@@ -47,54 +46,58 @@ import org.whispersystems.websocket.setup.WebSocketConnectListener;
 
 
 @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
-public class WebSocketResourceProvider<T extends Principal> implements WebSocketListener {
+public class WebSocketResourceProvider<T extends Principal> implements Session.Listener.AutoDemanding {
 
   /**
    * A static exception instance passed to outstanding requests (via {@code completeExceptionally} in
-   * {@link #onWebSocketClose(int, String)}
+   * {@link #onWebSocketClose}
    */
   public static final IOException CONNECTION_CLOSED_EXCEPTION = new IOException("Connection closed!");
   private static final Logger logger = LoggerFactory.getLogger(WebSocketResourceProvider.class);
 
   private final Map<Long, CompletableFuture<WebSocketResponseMessage>> requestMap = new ConcurrentHashMap<>();
 
-  private final T authenticated;
+  private final Optional<T> reusableAuth;
   private final WebSocketMessageFactory messageFactory;
   private final Optional<WebSocketConnectListener> connectListener;
   private final ApplicationHandler jerseyHandler;
   private final WebsocketRequestLog requestLog;
   private final Duration idleTimeout;
   private final String remoteAddress;
+  private final String remoteAddressPropertyName;
+  private final int localPort;
 
   private Session session;
-  private RemoteEndpoint remoteEndpoint;
   private WebSocketSessionContext context;
 
   private static final Set<String> EXCLUDED_UPGRADE_REQUEST_HEADERS = Set.of("connection", "upgrade");
 
   public WebSocketResourceProvider(String remoteAddress,
+      String remoteAddressPropertyName,
+      int localPort,
       ApplicationHandler jerseyHandler,
       WebsocketRequestLog requestLog,
-      T authenticated,
+      Optional<T> authenticated,
       WebSocketMessageFactory messageFactory,
       Optional<WebSocketConnectListener> connectListener,
       Duration idleTimeout) {
     this.remoteAddress = remoteAddress;
+    this.remoteAddressPropertyName = remoteAddressPropertyName;
+    this.localPort = localPort;
     this.jerseyHandler = jerseyHandler;
     this.requestLog = requestLog;
-    this.authenticated = authenticated;
+    this.reusableAuth = authenticated;
     this.messageFactory = messageFactory;
     this.connectListener = connectListener;
     this.idleTimeout = idleTimeout;
   }
 
   @Override
-  public void onWebSocketConnect(Session session) {
+  public void onWebSocketOpen(Session session) {
     this.session = session;
-    this.remoteEndpoint = session.getRemote();
     this.context = new WebSocketSessionContext(
-        new WebSocketClient(session, remoteEndpoint, messageFactory, requestMap));
-    this.context.setAuthenticated(authenticated);
+        new WebSocketClient(session, messageFactory, requestMap));
+    this.context.setAuthenticated(reusableAuth.orElse(null));
     this.session.setIdleTimeout(idleTimeout);
 
     connectListener.ifPresent(listener -> listener.onWebSocketConnect(this.context));
@@ -118,9 +121,19 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
   }
 
   @Override
-  public void onWebSocketBinary(byte[] payload, int offset, int length) {
+  public void onWebSocketBinary(final ByteBuffer payload, final Callback callback) {
     try {
-      WebSocketMessage webSocketMessage = messageFactory.parseMessage(payload, offset, length);
+      onWebSocketBinary(payload);
+      callback.succeed();
+    } catch (RuntimeException e) {
+      callback.fail(e);
+      throw e;
+    }
+  }
+
+  private void onWebSocketBinary(ByteBuffer payload) {
+    try {
+      final WebSocketMessage webSocketMessage = messageFactory.parseMessage(payload);
 
       switch (webSocketMessage.getType()) {
         case REQUEST_MESSAGE:
@@ -140,17 +153,21 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
   }
 
   @Override
-  public void onWebSocketClose(int statusCode, String reason) {
-    if (context != null) {
-      context.notifyClosed(statusCode, reason);
+  public void onWebSocketClose(int statusCode, String reason, Callback callback) {
+    try {
+      if (context != null) {
+        context.notifyClosed(statusCode, reason);
 
-      for (long requestId : requestMap.keySet()) {
-        CompletableFuture<WebSocketResponseMessage> outstandingRequest = requestMap.remove(requestId);
+        for (long requestId : requestMap.keySet()) {
+          CompletableFuture<WebSocketResponseMessage> outstandingRequest = requestMap.remove(requestId);
 
-        if (outstandingRequest != null) {
-          outstandingRequest.completeExceptionally(CONNECTION_CLOSED_EXCEPTION);
+          if (outstandingRequest != null) {
+            outstandingRequest.completeExceptionally(CONNECTION_CLOSED_EXCEPTION);
+          }
         }
       }
+    } finally {
+      callback.succeed();
     }
   }
 
@@ -159,52 +176,101 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
     logger.debug("onWebSocketText!");
   }
 
+  /**
+   * The property name where {@link org.whispersystems.websocket.auth.WebsocketAuthValueFactoryProvider} can find an
+   * authenticated principal that lives for the lifetime of the websocket
+   */
+  public static final String REUSABLE_AUTH_PROPERTY = WebSocketResourceProvider.class.getName() + ".reusableAuth";
+
+  /**
+   * The property name where request byte count is stored for metrics collection
+   */
+  public static final String REQUEST_LENGTH_PROPERTY = WebSocketResourceProvider.class.getName() + ".requestBytes";
+
+  /**
+   * The property name where response byte count is stored for metrics collection
+   */
+  public static final String RESPONSE_LENGTH_PROPERTY = WebSocketResourceProvider.class.getName() + ".responseBytes";
+
+  /**
+   * The property name where the listening port number is stored for metrics collection.
+   */
+  public static final String LISTEN_PORT_PROPERTY = WebSocketResourceProvider.class.getName() + ".listenPort";
+
   private void handleRequest(WebSocketRequestMessage requestMessage) {
     ContainerRequest containerRequest = new ContainerRequest(null, URI.create(requestMessage.getPath()),
         requestMessage.getVerb(), new WebSocketSecurityContext(new ContextPrincipal(context)),
         new MapPropertiesDelegate(new HashMap<>()), jerseyHandler.getConfiguration());
-    containerRequest.headers(getCombinedHeaders(session.getUpgradeRequest().getHeaders(), requestMessage.getHeaders()));
+    containerRequest.headers(getCombinedHeaders(toLowerCaseHeaders(session.getUpgradeRequest().getHeaders()), requestMessage.getHeaders()));
+
+    final int requestBytes = requestMessage.getBody().map(body -> body.length).orElse(0);
 
     if (requestMessage.getBody().isPresent()) {
       containerRequest.setEntityStream(new ByteArrayInputStream(requestMessage.getBody().get()));
     }
 
+
+    containerRequest.setProperty(remoteAddressPropertyName, remoteAddress);
+    containerRequest.setProperty(REUSABLE_AUTH_PROPERTY, reusableAuth);
+    containerRequest.setProperty(REQUEST_LENGTH_PROPERTY, requestBytes);
+    containerRequest.setProperty(LISTEN_PORT_PROPERTY, this.localPort);
+
     ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
     CompletableFuture<ContainerResponse> responseFuture = (CompletableFuture<ContainerResponse>) jerseyHandler.apply(
         containerRequest, responseBody);
 
-    responseFuture.thenAccept(response -> {
-      try {
-        sendResponse(requestMessage, response, responseBody);
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }
-      requestLog.log(remoteAddress, containerRequest, response);
-    }).exceptionally(exception -> {
-      logger.warn("Websocket Error: " + requestMessage.getVerb() + " " + requestMessage.getPath() + "\n"
-          + requestMessage.getBody(), exception);
-      try {
-        sendErrorResponse(requestMessage, Response.status(500).build());
-      } catch (IOException e) {
-        logger.warn("Failed to send error response", e);
-      }
-      requestLog.log(remoteAddress, containerRequest,
-          new ContainerResponse(containerRequest, Response.status(500).build()));
-      return null;
-    });
+    responseFuture
+        .thenAccept(response -> {
+          try {
+            final int responseBytes = responseBody.size();
+            containerRequest.setProperty(RESPONSE_LENGTH_PROPERTY, responseBytes);
+            sendResponse(requestMessage, response, responseBody);
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+          requestLog.log(remoteAddress, containerRequest, response);
+        })
+        .exceptionally(exception -> {
+          logger.warn("Websocket Error: " + requestMessage.getVerb() + " " + requestMessage.getPath() + "\n"
+              + requestMessage.getBody(), exception);
+          try {
+            containerRequest.setProperty(RESPONSE_LENGTH_PROPERTY, 0);
+            sendErrorResponse(requestMessage, Response.status(500).build());
+          } catch (IOException e) {
+            logger.warn("Failed to send error response", e);
+          }
+          requestLog.log(remoteAddress, containerRequest,
+              new ContainerResponse(containerRequest, Response.status(500).build()));
+          return null;
+        });
+  }
+
+  private static Map<String, List<String>> toLowerCaseHeaders(Map<String, List<String>> headers) {
+    return headers.entrySet().stream().collect(Collectors.toMap(
+        entry -> entry.getKey().trim().toLowerCase(),
+        Map.Entry::getValue));
   }
 
   @VisibleForTesting
-  static Map<String, List<String>> getCombinedHeaders(final Map<String, List<String>> upgradeRequestHeaders, final Map<String, String> requestMessageHeaders) {
+  static Map<String, List<String>> getCombinedHeaders(
+      final Map<String, List<String>> lowerCaseUpgradeRequestHeaders,
+      final Map<String, String> lowerCaseRequestMessageHeaders) {
     final Map<String, List<String>> combinedHeaders = new HashMap<>();
 
-    upgradeRequestHeaders.entrySet().stream()
+    lowerCaseUpgradeRequestHeaders.entrySet().stream()
         .filter(entry -> shouldIncludeUpgradeRequestHeader(entry.getKey()))
         .forEach(entry -> combinedHeaders.put(entry.getKey(), entry.getValue()));
 
-    requestMessageHeaders.entrySet().stream()
+    lowerCaseRequestMessageHeaders.entrySet().stream()
         .filter(entry -> shouldIncludeRequestMessageHeader(entry.getKey()))
         .forEach(entry -> combinedHeaders.put(entry.getKey(), List.of(entry.getValue())));
+
+    // 5/15/26: Typically, request-level headers should overwrite connection level headers, however some clients
+    // errantly supply a User-Agent header on their inner request. Once clients are updated this can be removed.
+    final List<String> userAgentFromUpgradeRequest = lowerCaseUpgradeRequestHeaders.get(HttpHeaders.USER_AGENT.toLowerCase());
+    if (userAgentFromUpgradeRequest != null) {
+      combinedHeaders.put(HttpHeaders.USER_AGENT.toLowerCase(), userAgentFromUpgradeRequest);
+    }
 
     return combinedHeaders;
   }
@@ -228,14 +294,14 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
   }
 
   private void close(Session session, int status, String message) {
-    session.close(status, message);
+    session.close(status, message, Callback.NOOP);
   }
 
   private void sendResponse(WebSocketRequestMessage requestMessage, ContainerResponse response,
       ByteArrayOutputStream responseBody) throws IOException {
     if (requestMessage.hasRequestId()) {
       byte[] body = responseBody.toByteArray();
-
+      response.getHeaders().putIfAbsent(HttpHeaders.CONTENT_LENGTH, List.of(body.length));
       if (body.length <= 0) {
         body = null;
       }
@@ -247,7 +313,7 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
               Optional.ofNullable(body))
           .toByteArray();
 
-      remoteEndpoint.sendBytes(ByteBuffer.wrap(responseBytes), WriteCallback.NOOP);
+      session.sendBinary(ByteBuffer.wrap(responseBytes), Callback.NOOP);
     }
   }
 
@@ -259,7 +325,7 @@ public class WebSocketResourceProvider<T extends Principal> implements WebSocket
           getHeaderList(error.getStringHeaders()),
           Optional.empty());
 
-      remoteEndpoint.sendBytes(ByteBuffer.wrap(response.toByteArray()), WriteCallback.NOOP);
+      session.sendBinary(ByteBuffer.wrap(response.toByteArray()), Callback.NOOP);
     }
   }
 

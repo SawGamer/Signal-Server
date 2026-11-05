@@ -13,26 +13,23 @@ public class RateLimitChallengeOptionManager {
 
   private final RateLimiters rateLimiters;
 
-  public static final String OPTION_RECAPTCHA = "recaptcha";
-  public static final String OPTION_PUSH_CHALLENGE = "pushChallenge";
-
   public RateLimitChallengeOptionManager(final RateLimiters rateLimiters) {
     this.rateLimiters = rateLimiters;
   }
 
-  public List<String> getChallengeOptions(final Account account) {
-    final List<String> options = new ArrayList<>(2);
+  public List<RateLimitChallengeOption> getChallengeOptions(final Account account) {
+    final List<RateLimitChallengeOption> options = new ArrayList<>(2);
 
-    if (rateLimiters.getRecaptchaChallengeAttemptLimiter().hasAvailablePermits(account.getUuid(), 1) &&
-        rateLimiters.getRecaptchaChallengeSuccessLimiter().hasAvailablePermits(account.getUuid(), 1)) {
+    if (rateLimiters.getCaptchaChallengeAttemptLimiter().hasAvailablePermits(account.getAccountIdentifier(), 1) &&
+        rateLimiters.getCaptchaChallengeSuccessLimiter().hasAvailablePermits(account.getAccountIdentifier(), 1)) {
 
-      options.add(OPTION_RECAPTCHA);
+      options.add(RateLimitChallengeOption.CAPTCHA);
     }
 
-    if (rateLimiters.getPushChallengeAttemptLimiter().hasAvailablePermits(account.getUuid(), 1) &&
-        rateLimiters.getPushChallengeSuccessLimiter().hasAvailablePermits(account.getUuid(), 1)) {
+    if (rateLimiters.getPushChallengeAttemptLimiter().hasAvailablePermits(account.getAccountIdentifier(), 1) &&
+        rateLimiters.getPushChallengeSuccessLimiter().hasAvailablePermits(account.getAccountIdentifier(), 1)) {
 
-      options.add(OPTION_PUSH_CHALLENGE);
+      options.add(RateLimitChallengeOption.PUSH_CHALLENGE);
     }
 
     return options;

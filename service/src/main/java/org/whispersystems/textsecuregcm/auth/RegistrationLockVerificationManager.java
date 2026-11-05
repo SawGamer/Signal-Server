@@ -14,23 +14,22 @@ import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import javax.annotation.Nullable;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
 import org.whispersystems.textsecuregcm.entities.RegistrationLockFailure;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.RegistrationRecoveryPasswordsManager;
+import org.whispersystems.textsecuregcm.storage.PhoneNumberRecoveryPasswordsManager;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 
 public class RegistrationLockVerificationManager {
   public enum Flow {
@@ -53,22 +52,23 @@ public class RegistrationLockVerificationManager {
   private static final String PHONE_VERIFICATION_TYPE_TAG_NAME = "phoneVerificationType";
 
   private final AccountsManager accounts;
-  private final ClientPresenceManager clientPresenceManager;
+  private final DisconnectionRequestManager disconnectionRequestManager;
   private final ExternalServiceCredentialsGenerator svr2CredentialGenerator;
   private final RateLimiters rateLimiters;
-  private final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager;
+  private final PhoneNumberRecoveryPasswordsManager phoneNumberRecoveryPasswordsManager;
   private final PushNotificationManager pushNotificationManager;
 
   public RegistrationLockVerificationManager(
-      final AccountsManager accounts, final ClientPresenceManager clientPresenceManager,
+      final AccountsManager accounts,
+      final DisconnectionRequestManager disconnectionRequestManager,
       final ExternalServiceCredentialsGenerator svr2CredentialGenerator,
-      final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager,
+      final PhoneNumberRecoveryPasswordsManager phoneNumberRecoveryPasswordsManager,
       final PushNotificationManager pushNotificationManager,
       final RateLimiters rateLimiters) {
     this.accounts = accounts;
-    this.clientPresenceManager = clientPresenceManager;
+    this.disconnectionRequestManager = disconnectionRequestManager;
     this.svr2CredentialGenerator = svr2CredentialGenerator;
-    this.registrationRecoveryPasswordsManager = registrationRecoveryPasswordsManager;
+    this.phoneNumberRecoveryPasswordsManager = phoneNumberRecoveryPasswordsManager;
     this.pushNotificationManager = pushNotificationManager;
     this.rateLimiters = rateLimiters;
   }
@@ -79,13 +79,16 @@ public class RegistrationLockVerificationManager {
    * @param account
    * @param clientRegistrationLock
    * @throws RateLimitExceededException
-   * @throws WebApplicationException
+   * @throws RegistrationLockFailureException
    */
   public void verifyRegistrationLock(final Account account, @Nullable final String clientRegistrationLock,
-      final String userAgent,
+      @Nullable final String userAgent,
       final Flow flow,
       final PhoneVerificationRequest.VerificationType phoneVerificationType
-  ) throws RateLimitExceededException, WebApplicationException {
+  ) throws RateLimitExceededException, RegistrationLockFailureException {
+
+    final String phoneNumber = account.getNumber()
+        .orElseThrow(() -> new IllegalArgumentException("account does not have a phone number"));
 
     final Tags expiredTags = Tags.of(UserAgentTagUtil.getPlatformTag(userAgent),
         Tag.of(REGISTRATION_LOCK_VERIFICATION_FLOW_TAG_NAME, flow.name()),
@@ -107,10 +110,9 @@ public class RegistrationLockVerificationManager {
     }
 
     if (StringUtils.isNotEmpty(clientRegistrationLock)) {
-      rateLimiters.getPinLimiter().validate(account.getNumber());
+      rateLimiters.getPinLimiter().validate(phoneNumber);
     }
 
-    final String phoneNumber = account.getNumber();
     final boolean registrationLockMatches = existingRegistrationLock.verify(clientRegistrationLock);
     final boolean alreadyLocked = account.hasLockedCredentials();
 
@@ -124,7 +126,6 @@ public class RegistrationLockVerificationManager {
     final DistributionSummary registrationLockIdleDays = DistributionSummary
         .builder(name(RegistrationLockVerificationManager.class, "registrationLockIdleDays"))
         .tags(additionalTags)
-        .publishPercentiles(0.75, 0.95, 0.99, 0.999)
         .distributionStatisticExpiry(Duration.ofHours(2))
         .register(Metrics.globalRegistry);
 
@@ -138,14 +139,8 @@ public class RegistrationLockVerificationManager {
       // Freezing the existing account credentials will definitively start the reglock timeout.
       // Until the timeout, the current reglock can still be supplied,
       // along with phone number verification, to restore access.
-      final ExternalServiceCredentials existingSvr2Credentials = svr2CredentialGenerator.generateForUuid(account.getUuid());
 
-      final Account updatedAccount;
-      if (!alreadyLocked) {
-        updatedAccount = accounts.update(account, Account::lockAuthTokenHash);
-      } else {
-        updatedAccount = account;
-      }
+      final List<TransactWriteItem> additionalWriteItems;
 
       // The client often sends an empty registration lock token on the first request
       // and sends an actual token if the server returns a 423 indicating that one is required.
@@ -154,11 +149,22 @@ public class RegistrationLockVerificationManager {
       // This allows users to re-register via registration recovery password
       // instead of always being forced to fall back to SMS verification.
       if (!phoneVerificationType.equals(PhoneVerificationRequest.VerificationType.RECOVERY_PASSWORD) || clientRegistrationLock != null) {
-        registrationRecoveryPasswordsManager.removeForNumber(updatedAccount.getNumber());
+        additionalWriteItems = List.of(phoneNumberRecoveryPasswordsManager.buildTransactWriteItemForRemovePassword(account.getPhoneNumberIdentifier()
+            .orElseThrow(() -> new AssertionError("Account with a phone number did not have a phone number identifier"))));
+      } else {
+        additionalWriteItems = Collections.emptyList();
       }
 
+      final Account updatedAccount = accounts.update(account.getAccountIdentifier(), a -> {
+        if (!a.hasLockedCredentials()) {
+          a.lockAuthTokenHash();
+        }
+
+        a.clearAccountRecoveryPassword();
+      }, additionalWriteItems);
+
       final List<Byte> deviceIds = updatedAccount.getDevices().stream().map(Device::getId).toList();
-      clientPresenceManager.disconnectAllPresences(updatedAccount.getUuid(), deviceIds);
+      disconnectionRequestManager.requestDisconnection(updatedAccount.getAccountIdentifier(), deviceIds);
 
       try {
         // Send a push notification that prompts the client to attempt login and fail due to locked credentials
@@ -167,12 +173,20 @@ public class RegistrationLockVerificationManager {
         Metrics.counter(CHALLENGED_DEVICE_NOT_PUSH_REGISTERED_COUNTER_NAME).increment();
       }
 
-      throw new WebApplicationException(Response.status(FAILURE_HTTP_STATUS)
-          .entity(new RegistrationLockFailure(existingRegistrationLock.getTimeRemaining().toMillis(),
-              existingRegistrationLock.needsFailureCredentials() ? existingSvr2Credentials : null))
-          .build());
+      throw new RegistrationLockFailureException(
+          new RegistrationLockFailure(
+              existingRegistrationLock.getTimeRemaining().toMillis(),
+              svr2FailureCredentials(existingRegistrationLock, updatedAccount)));
     }
 
     rateLimiters.getPinLimiter().clear(phoneNumber);
   }
+
+  private @Nullable ExternalServiceCredentials svr2FailureCredentials(final StoredRegistrationLock existingRegistrationLock, final Account account) {
+    if (!existingRegistrationLock.needsFailureCredentials()) {
+      return null;
+    }
+    return svr2CredentialGenerator.generateForUuid(account.getAccountIdentifier());
+  }
+
 }

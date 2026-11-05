@@ -10,14 +10,15 @@ import static java.lang.annotation.ElementType.METHOD;
 import static java.lang.annotation.ElementType.PARAMETER;
 import static java.lang.annotation.RetentionPolicy.RUNTIME;
 
+import jakarta.validation.Constraint;
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+import jakarta.validation.Payload;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 import java.util.Objects;
-import javax.validation.Constraint;
-import javax.validation.ConstraintValidator;
-import javax.validation.ConstraintValidatorContext;
-import javax.validation.Payload;
+import java.util.Optional;
 
 /**
  * Constraint annotation that requires annotated entity
@@ -25,7 +26,10 @@ import javax.validation.Payload;
  */
 @Target({ FIELD, PARAMETER, METHOD })
 @Retention(RUNTIME)
-@Constraint(validatedBy = E164.Validator.class)
+@Constraint(validatedBy = {
+    E164.Validator.class,
+    E164.OptionalValidator.class
+})
 @Documented
 public @interface E164 {
 
@@ -51,6 +55,14 @@ public @interface E164 {
         return false;
       }
       return true;
+    }
+  }
+
+  class OptionalValidator implements ConstraintValidator<E164, Optional<String>> {
+
+    @Override
+    public boolean isValid(final Optional<String> value, final ConstraintValidatorContext context) {
+        return value.map(s -> new Validator().isValid(s, context)).orElse(true);
     }
   }
 }

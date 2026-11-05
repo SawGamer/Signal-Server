@@ -8,7 +8,7 @@ package org.whispersystems.textsecuregcm.limits;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -42,35 +42,37 @@ class RateLimitChallengeOptionManagerTest {
       final boolean expectCaptcha,
       final boolean expectPushChallenge) {
 
-    final RateLimiter recaptchaChallengeAttemptLimiter = mock(RateLimiter.class);
-    final RateLimiter recaptchaChallengeSuccessLimiter = mock(RateLimiter.class);
+    final RateLimiter captchaChallengeAttemptLimiter = mock(RateLimiter.class);
+    final RateLimiter captchaChallengeSuccessLimiter = mock(RateLimiter.class);
     final RateLimiter pushChallengeAttemptLimiter = mock(RateLimiter.class);
     final RateLimiter pushChallengeSuccessLimiter = mock(RateLimiter.class);
 
-    when(rateLimiters.getRecaptchaChallengeAttemptLimiter()).thenReturn(recaptchaChallengeAttemptLimiter);
-    when(rateLimiters.getRecaptchaChallengeSuccessLimiter()).thenReturn(recaptchaChallengeSuccessLimiter);
+    when(rateLimiters.getCaptchaChallengeAttemptLimiter()).thenReturn(captchaChallengeAttemptLimiter);
+    when(rateLimiters.getCaptchaChallengeSuccessLimiter()).thenReturn(captchaChallengeSuccessLimiter);
     when(rateLimiters.getPushChallengeAttemptLimiter()).thenReturn(pushChallengeAttemptLimiter);
     when(rateLimiters.getPushChallengeSuccessLimiter()).thenReturn(pushChallengeSuccessLimiter);
 
-    when(recaptchaChallengeAttemptLimiter.hasAvailablePermits(any(UUID.class), anyInt())).thenReturn(captchaAttemptPermitted);
-    when(recaptchaChallengeSuccessLimiter.hasAvailablePermits(any(UUID.class), anyInt())).thenReturn(captchaSuccessPermitted);
-    when(pushChallengeAttemptLimiter.hasAvailablePermits(any(UUID.class), anyInt())).thenReturn(pushAttemptPermitted);
-    when(pushChallengeSuccessLimiter.hasAvailablePermits(any(UUID.class), anyInt())).thenReturn(pushSuccessPermitted);
+    when(captchaChallengeAttemptLimiter.hasAvailablePermits(any(UUID.class), anyLong())).thenReturn(
+        captchaAttemptPermitted);
+    when(captchaChallengeSuccessLimiter.hasAvailablePermits(any(UUID.class), anyLong())).thenReturn(
+        captchaSuccessPermitted);
+    when(pushChallengeAttemptLimiter.hasAvailablePermits(any(UUID.class), anyLong())).thenReturn(pushAttemptPermitted);
+    when(pushChallengeSuccessLimiter.hasAvailablePermits(any(UUID.class), anyLong())).thenReturn(pushSuccessPermitted);
 
     final int expectedLength = (expectCaptcha ? 1 : 0) + (expectPushChallenge ? 1 : 0);
 
     final Account account = mock(Account.class);
-    when(account.getUuid()).thenReturn(UUID.randomUUID());
+    when(account.getAccountIdentifier()).thenReturn(UUID.randomUUID());
 
-    final List<String> options = rateLimitChallengeOptionManager.getChallengeOptions(account);
+    final List<RateLimitChallengeOption> options = rateLimitChallengeOptionManager.getChallengeOptions(account);
     assertEquals(expectedLength, options.size());
 
     if (expectCaptcha) {
-      assertTrue(options.contains(RateLimitChallengeOptionManager.OPTION_RECAPTCHA));
+      assertTrue(options.contains(RateLimitChallengeOption.CAPTCHA));
     }
 
     if (expectPushChallenge) {
-      assertTrue(options.contains(RateLimitChallengeOptionManager.OPTION_PUSH_CHALLENGE));
+      assertTrue(options.contains(RateLimitChallengeOption.PUSH_CHALLENGE));
     }
   }
 

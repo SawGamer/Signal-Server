@@ -10,20 +10,21 @@ import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 import com.google.common.annotations.VisibleForTesting;
 import io.micrometer.core.instrument.Metrics;
 import java.io.IOException;
-import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
-import java.util.stream.Collectors;
-import javax.ws.rs.BadRequestException;
+import javax.annotation.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 
 public class CaptchaChecker {
   private static final Logger logger = LoggerFactory.getLogger(CaptchaChecker.class);
   private static final String INVALID_SITEKEY_COUNTER_NAME = name(CaptchaChecker.class, "invalidSiteKey");
-  private static final String ASSESSMENTS_COUNTER_NAME = name(RecaptchaClient.class, "assessments");
+  private static final String ASSESSMENTS_COUNTER_NAME = name(CaptchaChecker.class, "assessments");
   private static final String INVALID_ACTION_COUNTER_NAME = name(CaptchaChecker.class, "invalidActions");
 
   @VisibleForTesting
@@ -32,38 +33,44 @@ public class CaptchaChecker {
   private static final String SHORT_SUFFIX = "-short";
 
   private final ShortCodeExpander shortCodeExpander;
-  private final Map<String, CaptchaClient> captchaClientMap;
+  private final Function<String, CaptchaClient> captchaClientSupplier;
+  private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
 
   public CaptchaChecker(
       final ShortCodeExpander shortCodeRetriever,
-      final List<CaptchaClient> captchaClients) {
+      final Function<String, CaptchaClient> captchaClientSupplier,
+      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
     this.shortCodeExpander = shortCodeRetriever;
-    this.captchaClientMap = captchaClients.stream()
-        .collect(Collectors.toMap(CaptchaClient::scheme, Function.identity()));
+    this.captchaClientSupplier = captchaClientSupplier;
+    this.dynamicConfigurationManager = dynamicConfigurationManager;
   }
 
 
   /**
    * Check if a solved captcha should be accepted
    *
+   * @param maybeAci       optional account UUID of the user solving the captcha
    * @param expectedAction the {@link Action} for which this captcha solution is intended
    * @param input          expected to contain a prefix indicating the captcha scheme, sitekey, token, and action. The
    *                       expected format is {@code version-prefix.sitekey.action.token}
    * @param ip             IP of the solver
+   * @param userAgent      User-Agent of the solver
    * @return An {@link AssessmentResult} indicating whether the solution should be accepted, and a score that can be
    * used for metrics
-   * @throws IOException         if there is an error validating the captcha with the underlying service
-   * @throws BadRequestException if input is not in the expected format
+   * @throws IOException                     if there is an error validating the captcha with the underlying service
+   * @throws InvalidCaptchaArgumentException if input is not in the expected format
    */
   public AssessmentResult verify(
+      final Optional<UUID> maybeAci,
       final Action expectedAction,
       final String input,
-      final String ip) throws IOException {
+      final String ip,
+      @Nullable final String userAgent) throws IOException, InvalidCaptchaArgumentException {
     final String[] parts = input.split("\\" + SEPARATOR, 4);
 
     // we allow missing actions, if we're missing 1 part, assume it's the action
     if (parts.length < 4) {
-      throw new BadRequestException("too few parts");
+      throw new InvalidCaptchaArgumentException("too few parts");
     }
 
     final String prefix = parts[0];
@@ -76,38 +83,47 @@ public class CaptchaChecker {
       // This is a "short" solution that points to the actual solution. We need to fetch the
       // full solution before proceeding
       provider = prefix.substring(0, prefix.length() - SHORT_SUFFIX.length());
-      token = shortCodeExpander.retrieve(token).orElseThrow(() -> new BadRequestException("invalid shortcode"));
+      token = shortCodeExpander.retrieve(token).orElseThrow(() -> new InvalidCaptchaArgumentException("invalid shortcode"));
     }
 
-    final CaptchaClient client = this.captchaClientMap.get(provider);
+    final CaptchaClient client = this.captchaClientSupplier.apply(provider);
     if (client == null) {
-      throw new BadRequestException("invalid captcha scheme");
+      throw new InvalidCaptchaArgumentException("invalid captcha scheme");
     }
 
     final Action parsedAction = Action.parse(action)
         .orElseThrow(() -> {
-          Metrics.counter(INVALID_ACTION_COUNTER_NAME, "action", action).increment();
-          throw new BadRequestException("invalid captcha action");
+          Metrics.counter(INVALID_ACTION_COUNTER_NAME).increment();
+          return new InvalidCaptchaArgumentException("invalid captcha action");
         });
 
     if (!parsedAction.equals(expectedAction)) {
-      Metrics.counter(INVALID_ACTION_COUNTER_NAME, "action", action).increment();
-      throw new BadRequestException("invalid captcha action");
+      Metrics.counter(INVALID_ACTION_COUNTER_NAME, "action", parsedAction.getActionName()).increment();
+      throw new InvalidCaptchaArgumentException("invalid captcha action");
     }
 
     final Set<String> allowedSiteKeys = client.validSiteKeys(parsedAction);
     if (!allowedSiteKeys.contains(siteKey)) {
-      logger.debug("invalid site-key {}, action={}, token={}", siteKey, action, token);
-      Metrics.counter(INVALID_SITEKEY_COUNTER_NAME, "action", action).increment();
-      throw new BadRequestException("invalid captcha site-key");
+      logger.debug("invalid site-key {}, action={}", siteKey, parsedAction.getActionName());
+      Metrics.counter(INVALID_SITEKEY_COUNTER_NAME, "action", parsedAction.getActionName()).increment();
+      throw new InvalidCaptchaArgumentException("invalid captcha site-key");
     }
 
-    final AssessmentResult result = client.verify(siteKey, parsedAction, token, ip);
-    Metrics.counter(ASSESSMENTS_COUNTER_NAME,
-            "action", action,
-            "score", result.getScoreString(),
-            "provider", provider)
-        .increment();
-    return result;
+    try {
+      final AssessmentResult result = client.verify(maybeAci, siteKey, parsedAction, token, ip, userAgent);
+      Metrics.counter(ASSESSMENTS_COUNTER_NAME,
+              "action", parsedAction.getActionName(),
+              "score", result.getScoreString(),
+              "provider", provider)
+          .increment();
+      return result;
+    } catch (final IOException | RuntimeException e) {
+      if (dynamicConfigurationManager.getConfiguration().getCaptchaConfiguration().isFailOpen()) {
+        logger.warn("Failed to verify captcha; failing open", e);
+        return AssessmentResult.alwaysValid();
+      }
+
+      throw e;
+    }
   }
 }

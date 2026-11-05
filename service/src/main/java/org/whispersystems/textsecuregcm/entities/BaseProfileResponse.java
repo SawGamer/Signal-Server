@@ -8,6 +8,7 @@ package org.whispersystems.textsecuregcm.entities;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import io.swagger.v3.oas.annotations.media.Schema;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
@@ -15,28 +16,36 @@ import org.whispersystems.textsecuregcm.util.ServiceIdentifierAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
 
 import java.util.List;
+import java.util.Map;
 
+@Schema(description = "Unversioned profile containing basic information")
 public class BaseProfileResponse {
 
+  @Schema(description = "The account's public identity key (unpadded base64)")
   @JsonProperty
   @JsonSerialize(using = IdentityKeyAdapter.Serializer.class)
   @JsonDeserialize(using = IdentityKeyAdapter.Deserializer.class)
   private IdentityKey identityKey;
 
+  @Schema(description = "Checksum for unidentified access authentication (padded base64)")
   @JsonProperty
   @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
   @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
   private byte[] unidentifiedAccess;
 
+  @Schema(description = "Whether unidentified access is unrestricted for this account")
   @JsonProperty
   private boolean unrestrictedUnidentifiedAccess;
 
+  @Schema(description = "Device capabilities and whether they are enabled")
   @JsonProperty
-  private UserCapabilities capabilities;
+  private Map<String, Boolean> capabilities;
 
+  @Schema(description = "List of badges displayed on the profile")
   @JsonProperty
   private List<Badge> badges;
 
+  @Schema(description = "Service identifier (ACI or PNI)")
   @JsonProperty
   @JsonSerialize(using = ServiceIdentifierAdapter.ServiceIdentifierSerializer.class)
   @JsonDeserialize(using = ServiceIdentifierAdapter.ServiceIdentifierDeserializer.class)
@@ -48,7 +57,7 @@ public class BaseProfileResponse {
   public BaseProfileResponse(final IdentityKey identityKey,
       final byte[] unidentifiedAccess,
       final boolean unrestrictedUnidentifiedAccess,
-      final UserCapabilities capabilities,
+      final Map<String, Boolean> capabilities,
       final List<Badge> badges,
       final ServiceIdentifier uuid) {
 
@@ -72,7 +81,7 @@ public class BaseProfileResponse {
     return unrestrictedUnidentifiedAccess;
   }
 
-  public UserCapabilities getCapabilities() {
+  public Map<String, Boolean> getCapabilities() {
     return capabilities;
   }
 

@@ -5,7 +5,11 @@
 
 package org.whispersystems.textsecuregcm.entities;
 
-import javax.validation.constraints.NotEmpty;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotEmpty;
 
-public record ProvisioningMessage(@NotEmpty String body) {
+public record ProvisioningMessage(
+    @Schema(description = "The MIME base64-encoded body of the provisioning message to send to the destination device")
+    @NotEmpty
+    String body) {
 }

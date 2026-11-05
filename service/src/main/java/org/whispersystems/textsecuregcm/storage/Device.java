@@ -6,17 +6,22 @@ package org.whispersystems.textsecuregcm.storage;
 
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.google.common.annotations.VisibleForTesting;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
-import java.util.OptionalInt;
-import java.util.UUID;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
+import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
+import org.whispersystems.textsecuregcm.util.DeviceCapabilityAdapter;
 import org.whispersystems.textsecuregcm.util.DeviceNameByteArrayAdapter;
 
 public class Device {
@@ -27,7 +32,7 @@ public class Device {
   public static final List<Byte> ALL_POSSIBLE_DEVICE_IDS = IntStream.range(Device.PRIMARY_ID, MAXIMUM_DEVICE_ID).boxed()
       .map(Integer::byteValue).collect(Collectors.toList());
 
-  private static final long ALLOWED_LINKED_IDLE_MILLIS = Duration.ofDays(30).toMillis();
+  private static final long ALLOWED_LINKED_IDLE_MILLIS = Duration.ofDays(45).toMillis();
   private static final long ALLOWED_PRIMARY_IDLE_MILLIS = Duration.ofDays(180).toMillis();
 
   @JsonDeserialize(using = DeviceIdDeserializer.class)
@@ -38,6 +43,11 @@ public class Device {
   @JsonSerialize(using = DeviceNameByteArrayAdapter.Serializer.class)
   @JsonDeserialize(using = DeviceNameByteArrayAdapter.Deserializer.class)
   private byte[] name;
+
+  @JsonProperty("createdAt")
+  @JsonSerialize(using = ByteArrayAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
+  private byte[] createdAtCiphertext;
 
   @JsonProperty
   private String  authToken;
@@ -52,13 +62,7 @@ public class Device {
   private String  apnId;
 
   @JsonProperty
-  private String  voipApnId;
-
-  @JsonProperty
   private long pushTimestamp;
-
-  @JsonProperty
-  private long uninstalledFeedback;
 
   @JsonProperty
   private boolean fetchesMessages;
@@ -66,8 +70,8 @@ public class Device {
   @JsonProperty
   private int registrationId;
 
-  @Nullable
   @JsonProperty("pniRegistrationId")
+  @Nullable
   private Integer phoneNumberIdentityRegistrationId;
 
   @JsonProperty
@@ -80,7 +84,9 @@ public class Device {
   private String userAgent;
 
   @JsonProperty
-  private DeviceCapabilities capabilities;
+  @JsonSerialize(using = DeviceCapabilityAdapter.Serializer.class)
+  @JsonDeserialize(using = DeviceCapabilityAdapter.Deserializer.class)
+  private Set<DeviceCapability> capabilities = Collections.emptySet();
 
   public String getApnId() {
     return apnId;
@@ -92,22 +98,6 @@ public class Device {
     if (apnId != null) {
       this.pushTimestamp = System.currentTimeMillis();
     }
-  }
-
-  public String getVoipApnId() {
-    return voipApnId;
-  }
-
-  public void setVoipApnId(String voipApnId) {
-    this.voipApnId = voipApnId;
-  }
-
-  public void setUninstalledFeedbackTimestamp(long uninstalledFeedback) {
-    this.uninstalledFeedback = uninstalledFeedback;
-  }
-
-  public long getUninstalledFeedbackTimestamp() {
-    return uninstalledFeedback;
   }
 
   public void setLastSeen(long lastSeen) {
@@ -124,6 +114,14 @@ public class Device {
 
   public long getCreated() {
     return this.created;
+  }
+
+  public void setCreatedAtCiphertext(byte[] createdAtCiphertext) {
+    this.createdAtCiphertext = createdAtCiphertext;
+  }
+
+  public byte[] getCreatedAtCiphertext() {
+    return this.createdAtCiphertext;
   }
 
   public String getGcmId() {
@@ -190,19 +188,20 @@ public class Device {
     return new SaltedTokenHash(authToken, salt);
   }
 
-  @Nullable
-  public DeviceCapabilities getCapabilities() {
+  @VisibleForTesting
+  public Set<DeviceCapability> getCapabilities() {
     return capabilities;
   }
 
-  public void setCapabilities(DeviceCapabilities capabilities) {
-    this.capabilities = capabilities;
+  @JsonSetter
+  public void setCapabilities(@Nullable final Set<DeviceCapability> capabilities) {
+    this.capabilities = (capabilities == null || capabilities.isEmpty())
+        ? Collections.emptySet()
+        : EnumSet.copyOf(capabilities);
   }
 
-  public boolean isEnabled() {
-    boolean hasChannel = fetchesMessages || StringUtils.isNotEmpty(getApnId()) || StringUtils.isNotEmpty(getGcmId());
-
-    return (id == PRIMARY_ID && hasChannel) || (id != PRIMARY_ID && hasChannel && !isExpired());
+  public boolean hasCapability(final DeviceCapability capability) {
+    return capabilities.contains(capability);
   }
 
   public boolean isExpired() {
@@ -223,16 +222,26 @@ public class Device {
     return getId() == PRIMARY_ID;
   }
 
-  public int getRegistrationId() {
+  /// Returns the registration ID for this device associated with its account's account identity.
+  ///
+  /// @return the registration ID for this device associated with its account's account identity.
+  public int getAccountRegistrationId() {
     return registrationId;
+  }
+
+  /// Returns the registration ID for this device associated with its
+  /// account's phone-number identity, or an empty Optional if the account
+  /// does not have a phone number.
+  ///
+  /// @return the registration ID for this device associated with its
+  /// account's phone-number identity, or an empty Optional if the account
+  /// does not have a phone number.
+  public Optional<Integer> getPhoneNumberIdentityRegistrationId() {
+    return Optional.ofNullable(phoneNumberIdentityRegistrationId);
   }
 
   public void setRegistrationId(int registrationId) {
     this.registrationId = registrationId;
-  }
-
-  public OptionalInt getPhoneNumberIdentityRegistrationId() {
-    return phoneNumberIdentityRegistrationId != null ? OptionalInt.of(phoneNumberIdentityRegistrationId) : OptionalInt.empty();
   }
 
   public void setPhoneNumberIdentityRegistrationId(final int phoneNumberIdentityRegistrationId) {
@@ -249,8 +258,5 @@ public class Device {
 
   public String getUserAgent() {
     return this.userAgent;
-  }
-
-  public record DeviceCapabilities(boolean storage, boolean transfer, boolean pni, boolean paymentActivation) {
   }
 }

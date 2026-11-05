@@ -7,10 +7,12 @@ package org.whispersystems.textsecuregcm.metrics;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -22,9 +24,11 @@ import io.dropwizard.jersey.jackson.JacksonMessageBodyProvider;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.Principal;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.HashSet;
@@ -33,12 +37,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.UpgradeRequest;
-import org.eclipse.jetty.websocket.api.WriteCallback;
 import org.glassfish.jersey.server.ApplicationHandler;
 import org.glassfish.jersey.server.ContainerRequest;
 import org.glassfish.jersey.server.ContainerResponse;
@@ -48,8 +49,12 @@ import org.glassfish.jersey.server.monitoring.RequestEvent;
 import org.glassfish.jersey.uri.UriTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
+import org.whispersystems.textsecuregcm.tests.util.TestPrincipal;
 import org.whispersystems.websocket.WebSocketResourceProvider;
 import org.whispersystems.websocket.auth.WebsocketAuthValueFactoryProvider;
 import org.whispersystems.websocket.logging.WebsocketRequestLog;
@@ -61,27 +66,38 @@ class MetricsRequestEventListenerTest {
 
   private MeterRegistry meterRegistry;
   private Counter counter;
+  private Counter responseBytesCounter;
+  private Counter requestBytesCounter;
+  private Counter requestsByVersionCounter;
+  private ClientReleaseManager clientReleaseManager;
   private MetricsRequestEventListener listener;
 
   private static final TrafficSource TRAFFIC_SOURCE = TrafficSource.HTTP;
+  private static final int LISTEN_PORT = 1234;
 
   @BeforeEach
   void setup() {
     meterRegistry = mock(MeterRegistry.class);
-    counter = mock(Counter.class);
+    when(meterRegistry.gauge(anyString(), any(Number.class))).thenAnswer(invocation -> invocation.getArgument(1));
 
-    final ClientReleaseManager clientReleaseManager = mock(ClientReleaseManager.class);
-    when(clientReleaseManager.isVersionActive(any(), any())).thenReturn(false);
+    counter = mock(Counter.class);
+    responseBytesCounter = mock(Counter.class);
+    requestBytesCounter = mock(Counter.class);
+    requestsByVersionCounter = mock(Counter.class);
+    clientReleaseManager = mock(ClientReleaseManager.class);
 
     listener = new MetricsRequestEventListener(TRAFFIC_SOURCE, meterRegistry, clientReleaseManager);
   }
 
-  @Test
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
   @SuppressWarnings("unchecked")
-  void testOnEvent() {
+  void testOnEvent(final boolean versionActive) {
     final String path = "/test";
     final String method = "GET";
     final int statusCode = 200;
+
+    when(clientReleaseManager.isVersionActive(any(), any())).thenReturn(versionActive);
 
     final ExtendedUriInfo uriInfo = mock(ExtendedUriInfo.class);
     when(uriInfo.getMatchedTemplates()).thenReturn(Collections.singletonList(new UriTemplate(path)));
@@ -89,7 +105,9 @@ class MetricsRequestEventListenerTest {
     final ContainerRequest request = mock(ContainerRequest.class);
     when(request.getMethod()).thenReturn(method);
     when(request.getRequestHeader(HttpHeaders.USER_AGENT)).thenReturn(
-        Collections.singletonList("Signal-Android/4.53.7 (Android 8.1)"));
+        Collections.singletonList("Signal-Android/7.6.2 Android/34 libsignal/0.46.0"));
+    when(request.getProperty(WebSocketResourceProvider.REQUEST_LENGTH_PROPERTY)).thenReturn(512);
+    when(request.getProperty(WebSocketResourceProvider.RESPONSE_LENGTH_PROPERTY)).thenReturn(1024);
 
     final ContainerResponse response = mock(ContainerResponse.class);
     when(response.getStatus()).thenReturn(statusCode);
@@ -103,10 +121,20 @@ class MetricsRequestEventListenerTest {
     final ArgumentCaptor<Iterable<Tag>> tagCaptor = ArgumentCaptor.forClass(Iterable.class);
     when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), any(Iterable.class)))
         .thenReturn(counter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.RESPONSE_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(responseBytesCounter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(requestBytesCounter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUESTS_BY_VERSION_COUNTER_NAME), any(Tags.class)))
+        .thenReturn(requestsByVersionCounter);
 
     listener.onEvent(event);
 
     verify(meterRegistry).counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), tagCaptor.capture());
+    verify(counter).increment();
+    verify(responseBytesCounter).increment(1024L);
+    verify(requestBytesCounter).increment(512L);
+    verify(requestsByVersionCounter, versionActive ? times(1) : never()).increment();
 
     final Iterable<Tag> tagIterable = tagCaptor.getValue();
     final Set<Tag> tags = new HashSet<>();
@@ -115,12 +143,19 @@ class MetricsRequestEventListenerTest {
       tags.add(tag);
     }
 
-    assertEquals(5, tags.size());
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.PATH_TAG, path)));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.METHOD_TAG, method)));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(statusCode))));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase())));
-    assertTrue(tags.contains(Tag.of(UserAgentTagUtil.PLATFORM_TAG, "android")));
+    final Set<Tag> expectedTags = new HashSet<>(Set.of(
+        Tag.of(MetricsRequestEventListener.PATH_TAG, path),
+        Tag.of(MetricsRequestEventListener.METHOD_TAG, method),
+        Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(statusCode)),
+        Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase()),
+        Tag.of(MetricsRequestEventListener.AUTHENTICATED_TAG, "false"),
+        Tag.of(UserAgentTagUtil.PLATFORM_TAG, "android")));
+
+    if (versionActive) {
+      expectedTags.add(Tag.of(UserAgentTagUtil.VERSION_TAG, "7.6.2"));
+    }
+
+    assertEquals(expectedTags, tags);
   }
 
   @Test
@@ -138,35 +173,33 @@ class MetricsRequestEventListenerTest {
     final ApplicationHandler applicationHandler = new ApplicationHandler(resourceConfig);
     final WebsocketRequestLog requestLog = mock(WebsocketRequestLog.class);
     final WebSocketResourceProvider<TestPrincipal> provider = new WebSocketResourceProvider<>("127.0.0.1",
-        applicationHandler,
-        requestLog,
-        new TestPrincipal("foo"),
-        new ProtobufWebSocketMessageFactory(),
-        Optional.empty(),
-        Duration.ofMillis(30000));
+        RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME, LISTEN_PORT, applicationHandler, requestLog, TestPrincipal.authenticatedTestPrincipal("foo"),
+        new ProtobufWebSocketMessageFactory(), Optional.empty(), Duration.ofMillis(30000));
 
     final Session session = mock(Session.class);
-    final RemoteEndpoint remoteEndpoint = mock(RemoteEndpoint.class);
     final UpgradeRequest request = mock(UpgradeRequest.class);
 
     when(session.getUpgradeRequest()).thenReturn(request);
-    when(session.getRemote()).thenReturn(remoteEndpoint);
     when(request.getHeader(HttpHeaders.USER_AGENT)).thenReturn("Signal-Android/4.53.7 (Android 8.1)");
     when(request.getHeaders()).thenReturn(Map.of(HttpHeaders.USER_AGENT, List.of("Signal-Android/4.53.7 (Android 8.1)")));
 
     final ArgumentCaptor<Iterable<Tag>> tagCaptor = ArgumentCaptor.forClass(Iterable.class);
     when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), any(Iterable.class)))
         .thenReturn(counter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.RESPONSE_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(responseBytesCounter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(requestBytesCounter);
 
-    provider.onWebSocketConnect(session);
+    provider.onWebSocketOpen(session);
 
     byte[] message = new ProtobufWebSocketMessageFactory().createRequest(Optional.of(111L), "GET", "/v1/test/hello",
         new LinkedList<>(), Optional.empty()).toByteArray();
 
-    provider.onWebSocketBinary(message, 0, message.length);
+    provider.onWebSocketBinary(ByteBuffer.wrap(message), Callback.NOOP);
 
     final ArgumentCaptor<ByteBuffer> responseBytesCaptor = ArgumentCaptor.forClass(ByteBuffer.class);
-    verify(remoteEndpoint).sendBytes(responseBytesCaptor.capture(), any(WriteCallback.class));
+    verify(session).sendBinary(responseBytesCaptor.capture(), any(Callback.class));
 
     SubProtocol.WebSocketResponseMessage response = getResponse(responseBytesCaptor);
 
@@ -181,12 +214,15 @@ class MetricsRequestEventListenerTest {
       tags.add(tag);
     }
 
-    assertEquals(5, tags.size());
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.PATH_TAG, "/v1/test/hello")));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.METHOD_TAG, "GET")));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(200))));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase())));
-    assertTrue(tags.contains(Tag.of(UserAgentTagUtil.PLATFORM_TAG, "android")));
+    assertEquals(Set.of(
+            Tag.of(MetricsRequestEventListener.PATH_TAG, "/v1/test/hello"),
+            Tag.of(MetricsRequestEventListener.METHOD_TAG, "GET"),
+            Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(200)),
+            Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase()),
+            Tag.of(MetricsRequestEventListener.AUTHENTICATED_TAG, "true"),
+            Tag.of(MetricsRequestEventListener.LISTEN_PORT_TAG, Integer.toString(LISTEN_PORT)),
+            Tag.of(UserAgentTagUtil.PLATFORM_TAG, "android")),
+        tags);
   }
 
   @Test
@@ -204,30 +240,31 @@ class MetricsRequestEventListenerTest {
     final ApplicationHandler applicationHandler = new ApplicationHandler(resourceConfig);
     final WebsocketRequestLog requestLog = mock(WebsocketRequestLog.class);
     final WebSocketResourceProvider<TestPrincipal> provider = new WebSocketResourceProvider<>("127.0.0.1",
-        applicationHandler,
-        requestLog, new TestPrincipal("foo"), new ProtobufWebSocketMessageFactory(), Optional.empty(),
-        Duration.ofMillis(30000));
+        RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME, LISTEN_PORT, applicationHandler, requestLog, TestPrincipal.authenticatedTestPrincipal("foo"),
+        new ProtobufWebSocketMessageFactory(), Optional.empty(), Duration.ofMillis(30000));
 
     final Session session = mock(Session.class);
-    final RemoteEndpoint remoteEndpoint = mock(RemoteEndpoint.class);
     final UpgradeRequest request = mock(UpgradeRequest.class);
 
     when(session.getUpgradeRequest()).thenReturn(request);
-    when(session.getRemote()).thenReturn(remoteEndpoint);
 
     final ArgumentCaptor<Iterable<Tag>> tagCaptor = ArgumentCaptor.forClass(Iterable.class);
     when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), any(Iterable.class))).thenReturn(
         counter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.RESPONSE_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(responseBytesCounter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(requestBytesCounter);
 
-    provider.onWebSocketConnect(session);
+    provider.onWebSocketOpen(session);
 
     final byte[] message = new ProtobufWebSocketMessageFactory().createRequest(Optional.of(111L), "GET", "/v1/test/hello",
         new LinkedList<>(), Optional.empty()).toByteArray();
 
-    provider.onWebSocketBinary(message, 0, message.length);
+    provider.onWebSocketBinary(ByteBuffer.wrap(message), Callback.NOOP);
 
     final ArgumentCaptor<ByteBuffer> responseBytesCaptor = ArgumentCaptor.forClass(ByteBuffer.class);
-    verify(remoteEndpoint).sendBytes(responseBytesCaptor.capture(), any(WriteCallback.class));
+    verify(session).sendBinary(responseBytesCaptor.capture(), any(Callback.class));
 
     SubProtocol.WebSocketResponseMessage response = getResponse(responseBytesCaptor);
 
@@ -242,12 +279,83 @@ class MetricsRequestEventListenerTest {
       tags.add(tag);
     }
 
-    assertEquals(5, tags.size());
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.PATH_TAG, "/v1/test/hello")));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.METHOD_TAG, "GET")));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(200))));
-    assertTrue(tags.contains(Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase())));
-    assertTrue(tags.contains(Tag.of(UserAgentTagUtil.PLATFORM_TAG, "unrecognized")));
+    assertEquals(Set.of(
+            Tag.of(MetricsRequestEventListener.PATH_TAG, "/v1/test/hello"),
+            Tag.of(MetricsRequestEventListener.METHOD_TAG, "GET"),
+            Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(200)),
+            Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase()),
+            Tag.of(MetricsRequestEventListener.AUTHENTICATED_TAG, "true"),
+            Tag.of(MetricsRequestEventListener.LISTEN_PORT_TAG, Integer.toString(LISTEN_PORT)),
+            Tag.of(UserAgentTagUtil.PLATFORM_TAG, "unrecognized")),
+        tags);
+  }
+
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testAuthenticated(final boolean authenticated) throws IOException {
+    final MetricsApplicationEventListener applicationEventListener = mock(MetricsApplicationEventListener.class);
+    when(applicationEventListener.onRequest(any())).thenReturn(listener);
+
+    final ResourceConfig resourceConfig = new DropwizardResourceConfig();
+    resourceConfig.register(applicationEventListener);
+    resourceConfig.register(new TestResource());
+    resourceConfig.register(new WebSocketSessionContextValueFactoryProvider.Binder());
+    resourceConfig.register(new WebsocketAuthValueFactoryProvider.Binder<>(TestPrincipal.class));
+    resourceConfig.register(new JacksonMessageBodyProvider(new ObjectMapper()));
+
+    final ApplicationHandler applicationHandler = new ApplicationHandler(resourceConfig);
+    final WebsocketRequestLog requestLog = mock(WebsocketRequestLog.class);
+    final Optional<TestPrincipal> maybePrincipal = authenticated ? TestPrincipal.authenticatedTestPrincipal("foo") : Optional.empty();
+    final WebSocketResourceProvider<TestPrincipal> provider = new WebSocketResourceProvider<>("127.0.0.1",
+        RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME, LISTEN_PORT, applicationHandler, requestLog, maybePrincipal,
+        new ProtobufWebSocketMessageFactory(), Optional.empty(), Duration.ofMillis(30000));
+
+    final Session session = mock(Session.class);
+    final UpgradeRequest request = mock(UpgradeRequest.class);
+
+    when(session.getUpgradeRequest()).thenReturn(request);
+
+    final ArgumentCaptor<Iterable<Tag>> tagCaptor = ArgumentCaptor.forClass(Iterable.class);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), any(Iterable.class))).thenReturn(
+        counter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.RESPONSE_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(responseBytesCounter);
+    when(meterRegistry.counter(eq(MetricsRequestEventListener.REQUEST_BYTES_COUNTER_NAME), any(Iterable.class)))
+        .thenReturn(requestBytesCounter);
+
+    provider.onWebSocketOpen(session);
+
+    final byte[] message = new ProtobufWebSocketMessageFactory().createRequest(Optional.of(111L), "GET", "/v1/test/hello",
+        new LinkedList<>(), Optional.empty()).toByteArray();
+
+    provider.onWebSocketBinary(ByteBuffer.wrap(message), Callback.NOOP);
+
+    final ArgumentCaptor<ByteBuffer> responseBytesCaptor = ArgumentCaptor.forClass(ByteBuffer.class);
+    verify(session).sendBinary(responseBytesCaptor.capture(), any(Callback.class));
+
+    SubProtocol.WebSocketResponseMessage response = getResponse(responseBytesCaptor);
+
+    assertThat(response.getStatus()).isEqualTo(200);
+
+    verify(meterRegistry).counter(eq(MetricsRequestEventListener.REQUEST_COUNTER_NAME), tagCaptor.capture());
+
+    final Iterable<Tag> tagIterable = tagCaptor.getValue();
+    final Set<Tag> tags = new HashSet<>();
+
+    for (final Tag tag : tagIterable) {
+      tags.add(tag);
+    }
+
+    assertEquals(Set.of(
+            Tag.of(MetricsRequestEventListener.PATH_TAG, "/v1/test/hello"),
+            Tag.of(MetricsRequestEventListener.METHOD_TAG, "GET"),
+            Tag.of(MetricsRequestEventListener.STATUS_CODE_TAG, String.valueOf(200)),
+            Tag.of(MetricsRequestEventListener.TRAFFIC_SOURCE_TAG, TRAFFIC_SOURCE.name().toLowerCase()),
+            Tag.of(MetricsRequestEventListener.AUTHENTICATED_TAG, String.valueOf(authenticated)),
+            Tag.of(MetricsRequestEventListener.LISTEN_PORT_TAG, Integer.toString(LISTEN_PORT)),
+            Tag.of(UserAgentTagUtil.PLATFORM_TAG, "unrecognized")),
+        tags);
   }
 
   private static SubProtocol.WebSocketResponseMessage getResponse(ArgumentCaptor<ByteBuffer> responseCaptor)
@@ -256,19 +364,6 @@ class MetricsRequestEventListenerTest {
     return SubProtocol.WebSocketMessage.parseFrom(responseCaptor.getValue().array()).getResponse();
   }
 
-  public static class TestPrincipal implements Principal {
-
-    private final String name;
-
-    private TestPrincipal(String name) {
-      this.name = name;
-    }
-
-    @Override
-    public String getName() {
-      return name;
-    }
-  }
 
   @Path("/v1/test")
   public static class TestResource {

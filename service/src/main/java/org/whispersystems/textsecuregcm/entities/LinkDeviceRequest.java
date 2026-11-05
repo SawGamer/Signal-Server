@@ -4,20 +4,23 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import io.swagger.v3.oas.annotations.media.Schema;
-
-import javax.validation.Valid;
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import java.util.Optional;
 
 public record LinkDeviceRequest(@Schema(requiredMode = Schema.RequiredMode.REQUIRED, description = """
                                 The verification code associated with this device. Must match the verification code
                                 provided by the server when provisioning this device.
                                 """)
+                                @NotBlank
                                 String verificationCode,
 
+                                @NotNull
                                 @Valid
-                                AccountAttributes accountAttributes,
+                                @JsonProperty("accountAttributes")
+                                DeviceAttributes deviceAttributes,
 
                                 @NotNull
                                 @Valid
@@ -28,21 +31,22 @@ public record LinkDeviceRequest(@Schema(requiredMode = Schema.RequiredMode.REQUI
   @JsonCreator
   @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
   public LinkDeviceRequest(@JsonProperty("verificationCode") String verificationCode,
-                           @JsonProperty("accountAttributes") AccountAttributes accountAttributes,
+                           @JsonProperty("accountAttributes") DeviceAttributes deviceAttributes,
                            @JsonProperty("aciSignedPreKey") @NotNull @Valid ECSignedPreKey aciSignedPreKey,
-                           @JsonProperty("pniSignedPreKey") @NotNull @Valid ECSignedPreKey pniSignedPreKey,
+                           @JsonProperty("pniSignedPreKey") Optional<@Valid ECSignedPreKey> pniSignedPreKey,
                            @JsonProperty("aciPqLastResortPreKey") @NotNull @Valid KEMSignedPreKey aciPqLastResortPreKey,
-                           @JsonProperty("pniPqLastResortPreKey") @NotNull @Valid KEMSignedPreKey pniPqLastResortPreKey,
+                           @JsonProperty("pniPqLastResortPreKey") Optional<@Valid KEMSignedPreKey> pniPqLastResortPreKey,
                            @JsonProperty("apnToken") Optional<@Valid ApnRegistrationId> apnToken,
                            @JsonProperty("gcmToken") Optional<@Valid GcmRegistrationId> gcmToken) {
 
-    this(verificationCode, accountAttributes,
+    this(verificationCode, deviceAttributes,
         new DeviceActivationRequest(aciSignedPreKey, pniSignedPreKey, aciPqLastResortPreKey, pniPqLastResortPreKey, apnToken, gcmToken));
   }
 
   @AssertTrue
-  public boolean hasExactlyOneMessageDeliveryChannel() {
-    if (accountAttributes.getFetchesMessages()) {
+  @Schema(hidden = true)
+  public boolean isExactlyOneMessageDeliveryChannel() {
+    if (deviceAttributes != null && deviceAttributes.fetchesMessages()) {
       return deviceActivationRequest().apnToken().isEmpty() && deviceActivationRequest().gcmToken().isEmpty();
     } else {
       return deviceActivationRequest().apnToken().isPresent() ^ deviceActivationRequest().gcmToken().isPresent();

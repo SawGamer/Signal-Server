@@ -6,13 +6,19 @@
 package org.whispersystems.textsecuregcm.grpc;
 
 import io.grpc.Status;
+import org.whispersystems.textsecuregcm.storage.Device;
 
 public class DeviceIdUtil {
 
+  public static boolean isValid(int deviceId) {
+    return deviceId >= Device.PRIMARY_ID && deviceId <= Byte.MAX_VALUE;
+  }
+
   static byte validate(int deviceId) {
-    if (deviceId > Byte.MAX_VALUE) {
-      throw Status.INVALID_ARGUMENT.withDescription("Device ID is out of range").asRuntimeException();
+    if (!isValid(deviceId)) {
+      throw GrpcExceptions.invalidArguments("device ID is out of range");
     }
+
     return (byte) deviceId;
   }
 }

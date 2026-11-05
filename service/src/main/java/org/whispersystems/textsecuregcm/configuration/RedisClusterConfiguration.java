@@ -6,13 +6,17 @@
 package org.whispersystems.textsecuregcm.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-
-import javax.validation.Valid;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
+import com.fasterxml.jackson.annotation.JsonTypeName;
+import com.google.common.annotations.VisibleForTesting;
+import io.lettuce.core.resource.ClientResources;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
+import javax.annotation.Nullable;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 
-public class RedisClusterConfiguration {
+@JsonTypeName("default")
+public class RedisClusterConfiguration implements FaultTolerantRedisClusterFactory {
 
   @JsonProperty
   @NotEmpty
@@ -20,17 +24,16 @@ public class RedisClusterConfiguration {
 
   @JsonProperty
   @NotNull
-  private Duration timeout = Duration.ofMillis(3_000);
+  private Duration timeout = Duration.ofSeconds(1);
 
   @JsonProperty
-  @NotNull
-  @Valid
-  private CircuitBreakerConfiguration circuitBreaker = new CircuitBreakerConfiguration();
+  @Nullable
+  private String circuitBreakerConfigurationName;
 
-  @JsonProperty
-  @NotNull
-  @Valid
-  private RetryConfiguration retry = new RetryConfiguration();
+  @VisibleForTesting
+  void setConfigurationUri(final String configurationUri) {
+    this.configurationUri = configurationUri;
+  }
 
   public String getConfigurationUri() {
     return configurationUri;
@@ -40,11 +43,12 @@ public class RedisClusterConfiguration {
     return timeout;
   }
 
-  public CircuitBreakerConfiguration getCircuitBreakerConfiguration() {
-    return circuitBreaker;
+  @Nullable public String getCircuitBreakerConfigurationName() {
+    return circuitBreakerConfigurationName;
   }
 
-  public RetryConfiguration getRetryConfiguration() {
-    return retry;
+  @Override
+  public FaultTolerantRedisClusterClient build(final String name, final ClientResources.Builder clientResourcesBuilder) {
+    return new FaultTolerantRedisClusterClient(name, this, clientResourcesBuilder);
   }
 }

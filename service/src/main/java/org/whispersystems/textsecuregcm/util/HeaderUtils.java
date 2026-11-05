@@ -7,26 +7,41 @@ package org.whispersystems.textsecuregcm.util;
 
 import static java.util.Objects.requireNonNull;
 
+import com.google.common.net.HttpHeaders;
 import io.dropwizard.auth.basic.BasicCredentials;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
+import jakarta.ws.rs.ProcessingException;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 
 public final class HeaderUtils {
 
-  public static final String X_SIGNAL_AGENT = "X-Signal-Agent";
+  private static final Logger logger = LoggerFactory.getLogger(HeaderUtils.class);
 
-  public static final String X_SIGNAL_KEY = "X-Signal-Key";
+  public static final String X_SIGNAL_AGENT = "X-Signal-Agent";
 
   public static final String TIMESTAMP_HEADER = "X-Signal-Timestamp";
 
   public static final String UNIDENTIFIED_ACCESS_KEY = "Unidentified-Access-Key";
 
-  public static final String GROUP_SEND_CREDENTIAL = "Group-Send-Credential";
+  public static final String GROUP_SEND_TOKEN = "Group-Send-Token";
+
+  public static final String DONATION_PERMIT = "Donation-Permit";
+
+  private static final String INVALID_ACCEPT_LANGUAGE_COUNTER_NAME = MetricsUtil.name(HeaderUtils.class,
+      "invalidAcceptLanguage");
 
   private HeaderUtils() {
     // utility class
@@ -42,37 +57,18 @@ public final class HeaderUtils {
     return "Basic " + Base64.getEncoder().encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
   }
 
+  public static String bearerAuthHeader(final String token) {
+    return "Bearer " + token;
+  }
+
   @Nonnull
   public static String getTimestampHeader() {
     return TIMESTAMP_HEADER + ":" + System.currentTimeMillis();
   }
 
   /**
-   * Returns the most recent proxy in a chain described by an {@code X-Forwarded-For} header.
-   *
-   * @param forwardedFor the value of an X-Forwarded-For header
-   *
-   * @return the IP address of the most recent proxy in the forwarding chain, or empty if none was found or
-   * {@code forwardedFor} was null
-   *
-   * @see <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For">X-Forwarded-For - HTTP | MDN</a>
-   */
-  @Nonnull
-  public static Optional<String> getMostRecentProxy(@Nullable final String forwardedFor) {
-    return Optional.ofNullable(forwardedFor)
-        .map(ff -> {
-          final int idx = forwardedFor.lastIndexOf(',') + 1;
-          return idx < forwardedFor.length()
-              ? forwardedFor.substring(idx).trim()
-              : null;
-        })
-        .filter(StringUtils::isNotBlank);
-  }
-
-  /**
-   * Parses a Base64-encoded value of the `Authorization` header
-   * in the form of `Basic dXNlcm5hbWU6cGFzc3dvcmQ=`.
-   * Note: parsing logic is copied from {@link io.dropwizard.auth.basic.BasicCredentialAuthFilter#getCredentials(String)}.
+   * Parses a Base64-encoded value of the `Authorization` header in the form of `Basic dXNlcm5hbWU6cGFzc3dvcmQ=`. Note:
+   * parsing logic is copied from {@link io.dropwizard.auth.basic.BasicCredentialAuthFilter#getCredentials(String)}.
    */
   public static Optional<BasicCredentials> basicCredentialsFromAuthHeader(final String authHeader) {
     final int space = authHeader.indexOf(' ');
@@ -102,4 +98,25 @@ public final class HeaderUtils {
     final String password = decoded.substring(i + 1);
     return Optional.of(new BasicCredentials(username, password));
   }
+
+  public static List<Locale> getAcceptableLanguagesForRequest(ContainerRequestContext containerRequestContext) {
+    try {
+      return containerRequestContext.getAcceptableLanguages();
+    } catch (final ProcessingException e) {
+      final String userAgent = containerRequestContext.getHeaderString(HttpHeaders.USER_AGENT);
+      Metrics.counter(INVALID_ACCEPT_LANGUAGE_COUNTER_NAME, Tags.of(
+              UserAgentTagUtil.getPlatformTag(userAgent),
+              Tag.of("path", containerRequestContext.getUriInfo().getPath())))
+          .increment();
+      logger.debug("Could not get acceptable languages; Accept-Language: {}; User-Agent: {}",
+          // Strip any control codes to avoid any weird formatting with console loggers
+          containerRequestContext.getHeaderString(HttpHeaders.ACCEPT_LANGUAGE).replaceAll("\\p{Cntrl}", ""),
+          userAgent.replaceAll("\\p{Cntrl}", ""),
+          e);
+
+      return List.of();
+    }
+  }
+
+
 }

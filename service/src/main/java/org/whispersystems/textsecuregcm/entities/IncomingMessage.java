@@ -4,42 +4,64 @@
  */
 package org.whispersystems.textsecuregcm.entities;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.protobuf.ByteString;
-import java.util.Base64;
+import io.micrometer.core.instrument.Metrics;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import java.time.Clock;
+import java.util.Arrays;
+import java.util.Objects;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
-import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
 
-public record IncomingMessage(int type, byte destinationDeviceId, int destinationRegistrationId, String content) {
+public record IncomingMessage(int type,
+                              byte destinationDeviceId,
+                              int destinationRegistrationId,
+
+                              @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
+                              @NotNull
+                              // Note that max size is validated elsewhere in the interest of controlling responses and
+                              // reporting additional metrics.
+                              @Size(min = 1)
+                              byte[] content) {
+
+  private static final String REJECT_INVALID_ENVELOPE_TYPE_COUNTER_NAME =
+      MetricsUtil.name(IncomingMessage.class, "rejectInvalidEnvelopeType");
 
   public MessageProtos.Envelope toEnvelope(final ServiceIdentifier destinationIdentifier,
-      @Nullable Account sourceAccount,
+      @Nullable AciServiceIdentifier sourceServiceIdentifier,
       @Nullable Byte sourceDeviceId,
       final long timestamp,
       final boolean story,
+      final boolean ephemeral,
       final boolean urgent,
-      @Nullable byte[] reportSpamToken) {
-
-    final MessageProtos.Envelope.Type envelopeType = MessageProtos.Envelope.Type.forNumber(type());
-
-    if (envelopeType == null) {
-      throw new IllegalArgumentException("Bad envelope type: " + type());
-    }
+      @Nullable byte[] reportSpamToken,
+      final Clock clock) {
 
     final MessageProtos.Envelope.Builder envelopeBuilder = MessageProtos.Envelope.newBuilder();
 
-    envelopeBuilder.setType(envelopeType)
-        .setTimestamp(timestamp)
-        .setServerTimestamp(System.currentTimeMillis())
-        .setDestinationUuid(destinationIdentifier.toServiceIdentifierString())
-        .setStory(story)
+    envelopeBuilder
+        .setType(MessageProtos.Envelope.Type.forNumber(type))
+        .setClientTimestamp(timestamp)
+        .setServerTimestamp(clock.millis())
+        .setDestinationServiceId(destinationIdentifier.toCompactByteString())
+        .setEphemeral(ephemeral)
         .setUrgent(urgent);
 
-    if (sourceAccount != null && sourceDeviceId != null) {
+    if (story) {
+      // Avoid sending this field if it's false.
+      envelopeBuilder.setStory(true);
+    }
+
+    if (sourceServiceIdentifier != null && sourceDeviceId != null) {
       envelopeBuilder
-          .setSourceUuid(new AciServiceIdentifier(sourceAccount.getUuid()).toServiceIdentifierString())
+          .setSourceServiceId(sourceServiceIdentifier.toCompactByteString())
           .setSourceDevice(sourceDeviceId.intValue());
     }
 
@@ -47,10 +69,35 @@ public record IncomingMessage(int type, byte destinationDeviceId, int destinatio
       envelopeBuilder.setReportSpamToken(ByteString.copyFrom(reportSpamToken));
     }
 
-    if (StringUtils.isNotEmpty(content())) {
-      envelopeBuilder.setContent(ByteString.copyFrom(Base64.getDecoder().decode(content())));
-    }
+    envelopeBuilder.setContent(ByteString.copyFrom(content()));
 
     return envelopeBuilder.build();
+  }
+
+  @AssertTrue
+  @Schema(hidden = true)
+  public boolean isValidEnvelopeType() {
+    if (type() == MessageProtos.Envelope.Type.SERVER_DELIVERY_RECEIPT_VALUE ||
+        MessageProtos.Envelope.Type.forNumber(type()) == null) {
+
+      Metrics.counter(REJECT_INVALID_ENVELOPE_TYPE_COUNTER_NAME).increment();
+
+      return false;
+    }
+
+    return true;
+  }
+
+  @Override
+  public boolean equals(final Object o) {
+    if (!(o instanceof IncomingMessage(int otherType, byte otherDeviceId, int otherRegistrationId, byte[] otherContent)))
+      return false;
+    return type == otherType && destinationDeviceId == otherDeviceId
+        && destinationRegistrationId == otherRegistrationId && Objects.deepEquals(content, otherContent);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(type, destinationDeviceId, destinationRegistrationId, Arrays.hashCode(content));
   }
 }

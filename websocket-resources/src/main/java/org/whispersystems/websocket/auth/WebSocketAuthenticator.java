@@ -6,28 +6,19 @@ package org.whispersystems.websocket.auth;
 
 import java.security.Principal;
 import java.util.Optional;
-import org.eclipse.jetty.websocket.api.UpgradeRequest;
+import org.eclipse.jetty.ee10.websocket.server.JettyServerUpgradeRequest;
 
 public interface WebSocketAuthenticator<T extends Principal> {
 
-  AuthenticationResult<T> authenticate(UpgradeRequest request) throws AuthenticationException;
-
-  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
-  class AuthenticationResult<T> {
-    private final Optional<T> user;
-    private final boolean credentialsPresented;
-
-    public AuthenticationResult(final Optional<T> user, final boolean credentialsPresented) {
-      this.user = user;
-      this.credentialsPresented = credentialsPresented;
-    }
-
-    public Optional<T> getUser() {
-      return user;
-    }
-
-    public boolean credentialsPresented() {
-      return credentialsPresented;
-    }
-  }
+  /**
+   * Authenticates an account from credential headers provided in a WebSocket upgrade request.
+   *
+   * @param request the request from which to extract credentials
+   *
+   * @return the authenticated principal if credentials were provided and authenticated or empty if the caller is
+   * anonymous
+   *
+   * @throws InvalidCredentialsException if credentials were provided, but could not be authenticated
+   */
+  Optional<T> authenticate(JettyServerUpgradeRequest request) throws InvalidCredentialsException;
 }

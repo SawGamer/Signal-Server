@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.i18n.phonenumbers.PhoneNumberUtil;
@@ -18,6 +19,8 @@ import io.dropwizard.auth.PolymorphicAuthDynamicFeature;
 import io.dropwizard.auth.basic.BasicCredentialAuthFilter;
 import io.dropwizard.auth.basic.BasicCredentials;
 import java.security.Principal;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -26,20 +29,34 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
+import org.mockito.quality.Strictness;
 import org.signal.libsignal.protocol.IdentityKey;
-import org.signal.libsignal.protocol.ecc.ECPublicKey;
+import org.signal.libsignal.protocol.ServiceId;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.signal.libsignal.zkgroup.ServerPublicParams;
+import org.signal.libsignal.zkgroup.ServerSecretParams;
+import org.signal.libsignal.zkgroup.groups.ClientZkGroupCipher;
+import org.signal.libsignal.zkgroup.groups.GroupMasterKey;
+import org.signal.libsignal.zkgroup.groups.GroupSecretParams;
+import org.signal.libsignal.zkgroup.groups.UuidCiphertext;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendDerivedKeyPair;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendEndorsementsResponse;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendEndorsementsResponse.ReceivedEndorsements;
+import org.signal.libsignal.zkgroup.groupsend.GroupSendFullToken;
 import org.whispersystems.textsecuregcm.auth.AccountAuthenticator;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
-import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
+import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
+import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 
 public class AuthHelper {
   // Static seed to ensure reproducible tests.
@@ -68,28 +85,41 @@ public class AuthHelper {
 
   public static final String UNDISCOVERABLE_NUMBER   = "+18005551234";
   public static final UUID   UNDISCOVERABLE_UUID     = UUID.randomUUID();
+  public static final UUID   UNDISCOVERABLE_PNI      = UUID.randomUUID();
   public static final String UNDISCOVERABLE_PASSWORD = "IT'S A SECRET TO EVERYBODY.";
 
-  public static final IdentityKey VALID_IDENTITY = new IdentityKey(ECPublicKey.fromPublicKeyBytes(
-      Base64.getDecoder().decode("BcxxDU9FGMda70E7+Uvm7pnQcEdXQ64aJCpPUeRSfcFo")));
+  public static final UUID   NUMBERLESS_UUID     = UUID.randomUUID();
+  public static final String NUMBERLESS_PASSWORD = "numberless";
+  public static final byte[] NUMBERLESS_AUTH_CREDENTIAL_SALT = TestRandomUtil.nextBytes(16);
 
-  public static AccountsManager ACCOUNTS_MANAGER       = mock(AccountsManager.class);
-  public static Account         VALID_ACCOUNT          = mock(Account.class        );
-  public static Account         VALID_ACCOUNT_TWO      = mock(Account.class        );
-  public static Account         UNDISCOVERABLE_ACCOUNT = mock(Account.class        );
-  public static Account         VALID_ACCOUNT_3        = mock(Account.class        );
+  public static final ECKeyPair VALID_IDENTITY_KEY_PAIR = ECKeyPair.generate();
+  public static final IdentityKey VALID_IDENTITY = new IdentityKey(VALID_IDENTITY_KEY_PAIR.getPublicKey());
 
-  public static Device VALID_DEVICE           = mock(Device.class);
-  public static Device VALID_DEVICE_TWO       = mock(Device.class);
-  public static Device UNDISCOVERABLE_DEVICE  = mock(Device.class);
-  public static Device VALID_DEVICE_3_PRIMARY = mock(Device.class);
-  public static Device VALID_DEVICE_3_LINKED  = mock(Device.class);
+  public static final ECKeyPair VALID_PNI_IDENTITY_KEY_PAIR = ECKeyPair.generate();
+  public static final IdentityKey VALID_PNI_IDENTITY = new IdentityKey(VALID_PNI_IDENTITY_KEY_PAIR.getPublicKey());
 
-  private static SaltedTokenHash VALID_CREDENTIALS           = mock(SaltedTokenHash.class);
-  private static SaltedTokenHash VALID_CREDENTIALS_TWO       = mock(SaltedTokenHash.class);
-  private static SaltedTokenHash VALID_CREDENTIALS_3_PRIMARY = mock(SaltedTokenHash.class);
-  private static SaltedTokenHash VALID_CREDENTIALS_3_LINKED  = mock(SaltedTokenHash.class);
-  private static SaltedTokenHash UNDISCOVERABLE_CREDENTIALS  = mock(SaltedTokenHash.class);
+  public static AccountsManager ACCOUNTS_MANAGER = lenientMock(AccountsManager.class);
+  public static Account VALID_ACCOUNT = lenientMock(Account.class);
+  public static Account VALID_ACCOUNT_TWO = lenientMock(Account.class);
+  public static Account UNDISCOVERABLE_ACCOUNT = lenientMock(Account.class);
+  public static Account VALID_ACCOUNT_3 = lenientMock(Account.class);
+  public static Account NUMBERLESS_ACCOUNT = lenientMock(Account.class);
+
+  public static Device VALID_DEVICE = lenientMock(Device.class);
+  public static Device VALID_DEVICE_TWO = lenientMock(Device.class);
+  public static Device UNDISCOVERABLE_DEVICE = lenientMock(Device.class);
+  public static Device VALID_DEVICE_3_PRIMARY = lenientMock(Device.class);
+  public static Device VALID_DEVICE_3_LINKED = lenientMock(Device.class);
+  public static Device NUMBERLESS_DEVICE = lenientMock(Device.class);
+
+  public static final byte VALID_DEVICE_3_LINKED_ID = Device.PRIMARY_ID + 1;
+
+  private static SaltedTokenHash VALID_CREDENTIALS = lenientMock(SaltedTokenHash.class);
+  private static SaltedTokenHash VALID_CREDENTIALS_TWO = lenientMock(SaltedTokenHash.class);
+  private static SaltedTokenHash VALID_CREDENTIALS_3_PRIMARY = lenientMock(SaltedTokenHash.class);
+  private static SaltedTokenHash VALID_CREDENTIALS_3_LINKED = lenientMock(SaltedTokenHash.class);
+  private static SaltedTokenHash UNDISCOVERABLE_CREDENTIALS = lenientMock(SaltedTokenHash.class);
+  private static SaltedTokenHash NUMBERLESS_CREDENTIALS = lenientMock(SaltedTokenHash.class);
 
   private static final Collection<TestAccount> EXTENSION_TEST_ACCOUNTS = new HashSet<>();
 
@@ -116,13 +146,9 @@ public class AuthHelper {
     when(VALID_DEVICE_TWO.getId()).thenReturn(Device.PRIMARY_ID);
     when(UNDISCOVERABLE_DEVICE.getId()).thenReturn(Device.PRIMARY_ID);
     when(VALID_DEVICE_3_PRIMARY.getId()).thenReturn(Device.PRIMARY_ID);
-    when(VALID_DEVICE_3_LINKED.getId()).thenReturn((byte) 2);
+    when(VALID_DEVICE_3_LINKED.getId()).thenReturn(VALID_DEVICE_3_LINKED_ID);
 
-    when(VALID_DEVICE.isEnabled()).thenReturn(true);
-    when(VALID_DEVICE_TWO.isEnabled()).thenReturn(true);
     when(UNDISCOVERABLE_DEVICE.isPrimary()).thenReturn(true);
-    when(VALID_DEVICE_3_PRIMARY.isEnabled()).thenReturn(true);
-    when(VALID_DEVICE_3_LINKED.isEnabled()).thenReturn(true);
 
     when(VALID_ACCOUNT.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(VALID_DEVICE));
     when(VALID_ACCOUNT.getPrimaryDevice()).thenReturn(VALID_DEVICE);
@@ -139,31 +165,18 @@ public class AuthHelper {
     when(UNDISCOVERABLE_ACCOUNT.getDevices()).thenReturn(List.of(UNDISCOVERABLE_DEVICE));
     when(VALID_ACCOUNT_3.getDevices()).thenReturn(List.of(VALID_DEVICE_3_PRIMARY, VALID_DEVICE_3_LINKED));
 
-    when(VALID_ACCOUNT_TWO.hasEnabledLinkedDevice()).thenReturn(true);
-
-    when(VALID_ACCOUNT.getNumber()).thenReturn(VALID_NUMBER);
-    when(VALID_ACCOUNT.getUuid()).thenReturn(VALID_UUID);
-    when(VALID_ACCOUNT.getPhoneNumberIdentifier()).thenReturn(VALID_PNI);
-    when(VALID_ACCOUNT.getIdentifier(IdentityType.ACI)).thenReturn(VALID_UUID);
-    when(VALID_ACCOUNT.getIdentifier(IdentityType.PNI)).thenReturn(VALID_PNI);
-    when(VALID_ACCOUNT_TWO.getNumber()).thenReturn(VALID_NUMBER_TWO);
-    when(VALID_ACCOUNT_TWO.getUuid()).thenReturn(VALID_UUID_TWO);
-    when(VALID_ACCOUNT_TWO.getPhoneNumberIdentifier()).thenReturn(VALID_PNI_TWO);
-    when(VALID_ACCOUNT_TWO.getIdentifier(IdentityType.ACI)).thenReturn(VALID_UUID_TWO);
-    when(VALID_ACCOUNT_TWO.getPhoneNumberIdentifier()).thenReturn(VALID_PNI_TWO);
-    when(UNDISCOVERABLE_ACCOUNT.getNumber()).thenReturn(UNDISCOVERABLE_NUMBER);
-    when(UNDISCOVERABLE_ACCOUNT.getUuid()).thenReturn(UNDISCOVERABLE_UUID);
-    when(UNDISCOVERABLE_ACCOUNT.getIdentifier(IdentityType.ACI)).thenReturn(UNDISCOVERABLE_UUID);
-    when(VALID_ACCOUNT_3.getNumber()).thenReturn(VALID_NUMBER_3);
-    when(VALID_ACCOUNT_3.getUuid()).thenReturn(VALID_UUID_3);
-    when(VALID_ACCOUNT_3.getPhoneNumberIdentifier()).thenReturn(VALID_PNI_3);
-    when(VALID_ACCOUNT_3.getIdentifier(IdentityType.ACI)).thenReturn(VALID_UUID_3);
-    when(VALID_ACCOUNT_3.getIdentifier(IdentityType.PNI)).thenReturn(VALID_PNI_3);
-
-    when(VALID_ACCOUNT.isEnabled()).thenReturn(true);
-    when(VALID_ACCOUNT_TWO.isEnabled()).thenReturn(true);
-    when(UNDISCOVERABLE_ACCOUNT.isEnabled()).thenReturn(true);
-    when(VALID_ACCOUNT_3.isEnabled()).thenReturn(true);
+    when(VALID_ACCOUNT.getNumber()).thenReturn(Optional.of(VALID_NUMBER));
+    when(VALID_ACCOUNT.getAccountIdentifier()).thenReturn(VALID_UUID);
+    when(VALID_ACCOUNT.getPhoneNumberIdentifier()).thenReturn(Optional.of(VALID_PNI));
+    when(VALID_ACCOUNT_TWO.getNumber()).thenReturn(Optional.of(VALID_NUMBER_TWO));
+    when(VALID_ACCOUNT_TWO.getAccountIdentifier()).thenReturn(VALID_UUID_TWO);
+    when(VALID_ACCOUNT_TWO.getPhoneNumberIdentifier()).thenReturn(Optional.of(VALID_PNI_TWO));
+    when(UNDISCOVERABLE_ACCOUNT.getNumber()).thenReturn(Optional.of(UNDISCOVERABLE_NUMBER));
+    when(UNDISCOVERABLE_ACCOUNT.getAccountIdentifier()).thenReturn(UNDISCOVERABLE_UUID);
+    when(UNDISCOVERABLE_ACCOUNT.getPhoneNumberIdentifier()).thenReturn(Optional.of(UNDISCOVERABLE_PNI));
+    when(VALID_ACCOUNT_3.getNumber()).thenReturn(Optional.of(VALID_NUMBER_3));
+    when(VALID_ACCOUNT_3.getAccountIdentifier()).thenReturn(VALID_UUID_3);
+    when(VALID_ACCOUNT_3.getPhoneNumberIdentifier()).thenReturn(Optional.of(VALID_PNI_3));
 
     when(VALID_ACCOUNT.isDiscoverableByPhoneNumber()).thenReturn(true);
     when(VALID_ACCOUNT_TWO.isDiscoverableByPhoneNumber()).thenReturn(true);
@@ -178,7 +191,24 @@ public class AuthHelper {
     when(VALID_ACCOUNT_3.isIdentifiedBy(new AciServiceIdentifier(VALID_UUID_3))).thenReturn(true);
     when(VALID_ACCOUNT_3.isIdentifiedBy(new PniServiceIdentifier(VALID_PNI_3))).thenReturn(true);
 
-    when(VALID_ACCOUNT.getIdentityKey(IdentityType.ACI)).thenReturn(VALID_IDENTITY);
+    when(VALID_ACCOUNT.getAccountIdentityKey()).thenReturn(VALID_IDENTITY);
+    when(VALID_ACCOUNT.getPhoneNumberIdentityKey()).thenReturn(Optional.of(VALID_PNI_IDENTITY));
+
+    when(NUMBERLESS_CREDENTIALS.verify(NUMBERLESS_PASSWORD)).thenReturn(true);
+    when(NUMBERLESS_DEVICE.getAuthTokenHash()).thenReturn(NUMBERLESS_CREDENTIALS);
+    when(NUMBERLESS_DEVICE.isPrimary()).thenReturn(true);
+    when(NUMBERLESS_DEVICE.getId()).thenReturn(Device.PRIMARY_ID);
+    when(NUMBERLESS_ACCOUNT.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(NUMBERLESS_DEVICE));
+    when(NUMBERLESS_ACCOUNT.getPrimaryDevice()).thenReturn(NUMBERLESS_DEVICE);
+    when(NUMBERLESS_ACCOUNT.getDevices()).thenReturn(List.of(NUMBERLESS_DEVICE));
+    when(NUMBERLESS_ACCOUNT.getAccountIdentifier()).thenReturn(NUMBERLESS_UUID);
+    when(NUMBERLESS_ACCOUNT.isIdentifiedBy(new AciServiceIdentifier(NUMBERLESS_UUID))).thenReturn(true);
+    when(NUMBERLESS_ACCOUNT.isDiscoverableByPhoneNumber()).thenReturn(false);
+    when(NUMBERLESS_ACCOUNT.getAccountIdentityKey()).thenReturn(VALID_IDENTITY);
+    when(NUMBERLESS_ACCOUNT.getNumber()).thenReturn(Optional.empty());
+    when(NUMBERLESS_ACCOUNT.getPhoneNumberIdentifier()).thenReturn(Optional.empty());
+    when(NUMBERLESS_ACCOUNT.getAuthCredentialSalt()).thenReturn(Optional.of(NUMBERLESS_AUTH_CREDENTIAL_SALT));
+    when(NUMBERLESS_ACCOUNT.getAccountIdentifier()).thenReturn(NUMBERLESS_UUID);
 
     reset(ACCOUNTS_MANAGER);
 
@@ -197,16 +227,18 @@ public class AuthHelper {
     when(ACCOUNTS_MANAGER.getByAccountIdentifier(VALID_UUID_3)).thenReturn(Optional.of(VALID_ACCOUNT_3));
     when(ACCOUNTS_MANAGER.getByPhoneNumberIdentifier(VALID_PNI_3)).thenReturn(Optional.of(VALID_ACCOUNT_3));
 
+    when(ACCOUNTS_MANAGER.getByAccountIdentifier(NUMBERLESS_UUID)).thenReturn(Optional.of(NUMBERLESS_ACCOUNT));
+
     AccountsHelper.setupMockUpdateForAuthHelper(ACCOUNTS_MANAGER);
 
     for (TestAccount testAccount : TEST_ACCOUNTS) {
       testAccount.setup(ACCOUNTS_MANAGER);
     }
 
-    AuthFilter<BasicCredentials, AuthenticatedAccount> accountAuthFilter = new BasicCredentialAuthFilter.Builder<AuthenticatedAccount>().setAuthenticator(
+    AuthFilter<BasicCredentials, AuthenticatedDevice> accountAuthFilter = new BasicCredentialAuthFilter.Builder<AuthenticatedDevice>().setAuthenticator(
         new AccountAuthenticator(ACCOUNTS_MANAGER)).buildAuthFilter();
 
-    return new PolymorphicAuthDynamicFeature<>(ImmutableMap.of(AuthenticatedAccount.class, accountAuthFilter));
+    return new PolymorphicAuthDynamicFeature<>(ImmutableMap.of(AuthenticatedDevice.class, accountAuthFilter));
   }
 
   public static String getAuthHeader(UUID uuid, byte deviceId, String password) {
@@ -222,6 +254,7 @@ public class AuthHelper {
   }
 
   public static String getUnidentifiedAccessHeader(byte[] key) {
+    assert key.length == 16;
     return Base64.getEncoder().encodeToString(key);
   }
 
@@ -236,12 +269,12 @@ public class AuthHelper {
   }
 
   public static final class TestAccount {
-    public final String                    number;
-    public final UUID                      uuid;
-    public final String                    password;
-    public final Account                   account                   = mock(Account.class);
-    public final Device                    device                    = mock(Device.class);
-    public final SaltedTokenHash saltedTokenHash = mock(SaltedTokenHash.class);
+    public final String number;
+    public final UUID uuid;
+    public final String password;
+    public final Account account = lenientMock(Account.class);
+    public final Device device = lenientMock(Device.class);
+    public final SaltedTokenHash saltedTokenHash = lenientMock(SaltedTokenHash.class);
 
     public TestAccount(String number, UUID uuid, String password) {
       this.number = number;
@@ -258,12 +291,11 @@ public class AuthHelper {
       when(device.getAuthTokenHash()).thenReturn(saltedTokenHash);
       when(device.isPrimary()).thenReturn(true);
       when(device.getId()).thenReturn(Device.PRIMARY_ID);
-      when(device.isEnabled()).thenReturn(true);
       when(account.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(device));
       when(account.getPrimaryDevice()).thenReturn(device);
-      when(account.getNumber()).thenReturn(number);
-      when(account.getUuid()).thenReturn(uuid);
-      when(account.isEnabled()).thenReturn(true);
+      when(account.getNumber()).thenReturn(Optional.of(number));
+      when(account.getAccountIdentifier()).thenReturn(uuid);
+      when(account.getAccountIdentifier()).thenReturn(uuid);
       when(accountsManager.getByE164(number)).thenReturn(Optional.of(account));
       when(accountsManager.getByAccountIdentifier(uuid)).thenReturn(Optional.of(account));
     }
@@ -311,5 +343,41 @@ public class AuthHelper {
 
       EXTENSION_TEST_ACCOUNTS.clear();
     }
+  }
+
+  public static byte[] validGroupSendToken(ServerSecretParams serverSecretParams, List<ServiceIdentifier> recipients, Instant expiration) throws Exception {
+    final ServerPublicParams serverPublicParams = serverSecretParams.getPublicParams();
+    final GroupMasterKey groupMasterKey = new GroupMasterKey(new byte[32]);
+    final GroupSecretParams groupSecretParams = GroupSecretParams.deriveFromMasterKey(groupMasterKey);
+    final ClientZkGroupCipher clientZkGroupCipher = new ClientZkGroupCipher(groupSecretParams);
+
+    final ServiceId.Aci sender = new ServiceId.Aci(UUID.randomUUID());
+    List<ServiceId> groupPlaintexts = Stream.concat(Stream.of(sender), recipients.stream().map(ServiceIdentifier::toLibsignal)).toList();
+    List<UuidCiphertext> groupCiphertexts = groupPlaintexts.stream()
+        .map(clientZkGroupCipher::encrypt)
+        .toList();
+    GroupSendDerivedKeyPair keyPair = GroupSendDerivedKeyPair.forExpiration(expiration, serverSecretParams);
+    GroupSendEndorsementsResponse endorsementsResponse =
+        GroupSendEndorsementsResponse.issue(groupCiphertexts, keyPair);
+    ReceivedEndorsements endorsements =
+        endorsementsResponse.receive(
+            groupPlaintexts,
+            sender,
+            expiration.minus(Duration.ofDays(1)),
+            groupSecretParams,
+            serverPublicParams);
+    GroupSendFullToken token = endorsements.combinedEndorsement().toFullToken(groupSecretParams, expiration);
+    return token.serialize();
+  }
+
+  public static String validGroupSendTokenHeader(ServerSecretParams serverSecretParams, List<ServiceIdentifier> recipients, Instant expiration) throws Exception {
+    return Base64.getEncoder().encodeToString(validGroupSendToken(serverSecretParams, recipients, expiration));
+  }
+
+  // because this class has static mocks, if it is first loaded via a test class with Strictness.STRICT (the default
+  // for MockitoExtension), all the static mocks will be strict, which can cause `PotentialStubbingProblem`s in other
+  // tests
+  private static <T> T lenientMock(Class<T> klass) {
+    return mock(klass, withSettings().strictness(Strictness.LENIENT));
   }
 }

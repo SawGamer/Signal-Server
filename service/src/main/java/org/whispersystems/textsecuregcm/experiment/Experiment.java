@@ -18,6 +18,7 @@ import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Mono;
 
 /**
  * An experiment compares the results of two operations and records metrics to assess how frequently they match.
@@ -68,6 +69,18 @@ public class Experiment {
     this.bothPresentMismatchTimer = bothPresentMismatchTimer;
     this.controlNullMismatchTimer = controlNullMismatchTimer;
     this.experimentNullMismatchTimer = experimentNullMismatchTimer;
+  }
+
+  public <T> void compareResult(final T expected, final T experimentResult) {
+    recordResult(expected, experimentResult, Timer.start());
+  }
+
+  public <T> void compareMonoResult(final T expected, final Mono<T> experimentMono) {
+    final Timer.Sample sample = Timer.start();
+
+    experimentMono.subscribe(
+        actual -> recordResult(expected, actual, sample),
+        cause -> recordError(cause, sample));
   }
 
   public <T> void compareFutureResult(final T expected, final CompletionStage<T> experimentStage) {

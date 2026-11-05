@@ -76,7 +76,13 @@ public class AssessmentResult {
     if (!solved) {
       return false;
     }
-    return this.actualScore >= scoreThreshold.orElse(this.defaultScoreThreshold);
+    // Since HCaptcha scores are truncated to 2 decimal places, we can multiply by 100 and round to the nearest int for
+    // comparison instead of floating point comparisons
+    return normalizedIntScore(this.actualScore) >= normalizedIntScore(scoreThreshold.orElse(this.defaultScoreThreshold));
+  }
+
+  private static int normalizedIntScore(final float score) {
+    return Math.round(score * 100);
   }
 
   public String getScoreString() {
@@ -87,6 +93,9 @@ public class AssessmentResult {
     return this.actualScore;
   }
 
+  public int getNormalizedIntScore() {
+    return normalizedIntScore(this.actualScore);
+  }
 
   /**
    * Map a captcha score in [0.0, 1.0] to a low cardinality discrete space in [0, 100] suitable for use in metrics

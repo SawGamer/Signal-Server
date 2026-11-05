@@ -5,9 +5,9 @@
 
 package org.whispersystems.textsecuregcm.auth;
 
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 import java.util.Base64;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Response;
 
 public class Anonymous {
 
@@ -16,6 +16,9 @@ public class Anonymous {
   public Anonymous(String header) {
     try {
       this.unidentifiedSenderAccessKey = Base64.getDecoder().decode(header);
+      if (unidentifiedSenderAccessKey.length != UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH) {
+        throw new WebApplicationException("access key length must be 16", Response.Status.UNAUTHORIZED);
+      }
     } catch (IllegalArgumentException e) {
       throw new WebApplicationException(e, Response.Status.UNAUTHORIZED);
     }

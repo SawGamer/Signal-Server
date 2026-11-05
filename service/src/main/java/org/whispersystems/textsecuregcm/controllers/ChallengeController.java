@@ -18,47 +18,56 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.parameters.RequestBody;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
-import javax.servlet.http.HttpServletRequest;
-import javax.validation.Valid;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.glassfish.jersey.server.ManagedAsync;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.captcha.InvalidCaptchaArgumentException;
+import org.whispersystems.textsecuregcm.entities.AnswerCaptchaChallengeRequest;
 import org.whispersystems.textsecuregcm.entities.AnswerChallengeRequest;
 import org.whispersystems.textsecuregcm.entities.AnswerPushChallengeRequest;
-import org.whispersystems.textsecuregcm.entities.AnswerRecaptchaChallengeRequest;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.limits.RateLimitChallengeManager;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
-import org.whispersystems.textsecuregcm.spam.Extract;
-import org.whispersystems.textsecuregcm.spam.FilterSpam;
-import org.whispersystems.textsecuregcm.spam.PushChallengeConfig;
-import org.whispersystems.textsecuregcm.spam.ScoreThreshold;
-import org.whispersystems.textsecuregcm.util.HeaderUtils;
+import org.whispersystems.textsecuregcm.spam.ChallengeConstraintChecker;
+import org.whispersystems.textsecuregcm.spam.ChallengeConstraintChecker.ChallengeConstraints;
+import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.storage.AccountsManager;
 
 @Path("/v1/challenge")
 @Tag(name = "Challenge")
-@FilterSpam
 public class ChallengeController {
 
+  private final AccountsManager accountsManager;
   private final RateLimitChallengeManager rateLimitChallengeManager;
-  private final boolean useRemoteAddress;
+  private final ChallengeConstraintChecker challengeConstraintChecker;
+
+  private static final Logger logger = LoggerFactory.getLogger(ChallengeController.class);
 
   private static final String CHALLENGE_RESPONSE_COUNTER_NAME = name(ChallengeController.class, "challengeResponse");
   private static final String CHALLENGE_TYPE_TAG = "type";
 
-  public ChallengeController(final RateLimitChallengeManager rateLimitChallengeManager,
-      final boolean useRemoteAddress) {
+  public ChallengeController(
+      final AccountsManager accountsManager,
+      final RateLimitChallengeManager rateLimitChallengeManager,
+      final ChallengeConstraintChecker challengeConstraintChecker) {
+    this.accountsManager = accountsManager;
     this.rateLimitChallengeManager = rateLimitChallengeManager;
-    this.useRemoteAddress = useRemoteAddress;
+    this.challengeConstraintChecker = challengeConstraintChecker;
   }
 
   @PUT
@@ -68,49 +77,50 @@ public class ChallengeController {
       summary = "Submit proof of a challenge completion",
       description = """
           Some server endpoints (the "send message" endpoint, for example) may return a 428 response indicating the client must complete a challenge before continuing.
-          Clients may use this endpoint to provide proof of a completed challenge. If successful, the client may then 
+          Clients may use this endpoint to provide proof of a completed challenge. If successful, the client may then
           continue their original operation.
           """,
       requestBody = @RequestBody(content = {@Content(schema = @Schema(oneOf = {AnswerPushChallengeRequest.class,
-          AnswerRecaptchaChallengeRequest.class}))})
+          AnswerCaptchaChallengeRequest.class}))})
   )
   @ApiResponse(responseCode = "200", description = "Indicates the challenge proof was accepted")
-  @ApiResponse(responseCode = "413", description = "Too many attempts", headers = @Header(
-      name = "Retry-After",
-      description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
+  @ApiResponse(responseCode = "400", description = "The request was invalid")
+  @ApiResponse(responseCode = "428", description = "Submitted captcha token was not accepted")
   @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
       name = "Retry-After",
       description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
-  public Response handleChallengeResponse(@Auth final AuthenticatedAccount auth,
+  @ManagedAsync
+  public Response handleChallengeResponse(@Auth final AuthenticatedDevice auth,
       @Valid final AnswerChallengeRequest answerRequest,
-      @HeaderParam(HttpHeaders.X_FORWARDED_FOR) final String forwardedFor,
-      @Context HttpServletRequest request,
-      @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent,
-      @Extract final ScoreThreshold captchaScoreThreshold,
-      @Extract final PushChallengeConfig pushChallengeConfig) throws RateLimitExceededException, IOException {
+      @Context final ContainerRequestContext requestContext,
+      @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent) throws RateLimitExceededException {
+
+    final Account account = accountsManager.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED));
 
     Tags tags = Tags.of(UserAgentTagUtil.getPlatformTag(userAgent));
 
+    final ChallengeConstraints constraints = challengeConstraintChecker.challengeConstraintsHttp(
+        requestContext, account);
     try {
       if (answerRequest instanceof final AnswerPushChallengeRequest pushChallengeRequest) {
         tags = tags.and(CHALLENGE_TYPE_TAG, "push");
 
-        if (!pushChallengeConfig.pushPermitted()) {
+        if (!constraints.pushPermitted()) {
           return Response.status(429).build();
         }
-        rateLimitChallengeManager.answerPushChallenge(auth.getAccount(), pushChallengeRequest.getChallenge());
-      } else if (answerRequest instanceof AnswerRecaptchaChallengeRequest recaptchaChallengeRequest) {
-        tags = tags.and(CHALLENGE_TYPE_TAG, "recaptcha");
+        rateLimitChallengeManager.answerPushChallenge(account, pushChallengeRequest.getChallenge());
+      } else if (answerRequest instanceof final AnswerCaptchaChallengeRequest captchaChallengeRequest) {
+        tags = tags.and(CHALLENGE_TYPE_TAG, "captcha");
 
-        final String remoteAddress = useRemoteAddress
-            ? request.getRemoteAddr()
-            : HeaderUtils.getMostRecentProxy(forwardedFor).orElseThrow(BadRequestException::new);
-        boolean success = rateLimitChallengeManager.answerRecaptchaChallenge(
-            auth.getAccount(),
-            recaptchaChallengeRequest.getCaptcha(),
+        final String remoteAddress = (String) requestContext.getProperty(
+            RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME);
+        final boolean success = rateLimitChallengeManager.answerCaptchaChallenge(
+            account,
+            captchaChallengeRequest.getCaptcha(),
             remoteAddress,
             userAgent,
-            captchaScoreThreshold.getScoreThreshold());
+            constraints.captchaScoreThreshold());
 
         if (!success) {
           return Response.status(428).build();
@@ -119,6 +129,11 @@ public class ChallengeController {
       } else {
         tags = tags.and(CHALLENGE_TYPE_TAG, "unrecognized");
       }
+    } catch (final InvalidCaptchaArgumentException e) {
+      return Response.status(Response.Status.BAD_REQUEST.getStatusCode(), e.getMessage()).build();
+    } catch (final IOException e) {
+      logger.error("error assessing captcha during challenge response handling", e);
+      return Response.status(Response.Status.SERVICE_UNAVAILABLE).build();
     } finally {
       Metrics.counter(CHALLENGE_RESPONSE_COUNTER_NAME, tags).increment();
     }
@@ -132,7 +147,7 @@ public class ChallengeController {
       summary = "Request a push challenge",
       description = """
           Clients may proactively request a push challenge by making an empty POST request. Push challenges will only be
-          sent to the requesting account’s main device. When the push is received it may be provided as proof of completed 
+          sent to the requesting account’s main device. When the push is received it may be provided as proof of completed
           challenge to /v1/challenge.
           APNs challenge payloads will be formatted as follows:
           ```
@@ -146,12 +161,12 @@ public class ChallengeController {
               "rateLimitChallenge": "{CHALLENGE_TOKEN}"
           }
           ```
-          FCM challenge payloads will be formatted as follows: 
+          FCM challenge payloads will be formatted as follows:
           ```
           {"rateLimitChallenge": "{CHALLENGE_TOKEN}"}
           ```
 
-          Clients may retry the PUT in the event of an HTTP/5xx response (except HTTP/508) from the server, but must 
+          Clients may retry the PUT in the event of an HTTP/5xx response (except HTTP/508) from the server, but must
           implement an exponential back-off system and limit the total number of retries.
           """
   )
@@ -169,13 +184,19 @@ public class ChallengeController {
   @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
       name = "Retry-After",
       description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
-  public Response requestPushChallenge(@Auth final AuthenticatedAccount auth,
-      @Extract PushChallengeConfig pushChallengeConfig) {
-    if (!pushChallengeConfig.pushPermitted()) {
+  @ManagedAsync
+  public Response requestPushChallenge(@Auth final AuthenticatedDevice auth,
+      @Context ContainerRequestContext requestContext) {
+
+    final Account account = accountsManager.getByAccountIdentifier(auth.accountIdentifier())
+        .orElseThrow(() -> new WebApplicationException(Response.Status.UNAUTHORIZED));
+
+    final ChallengeConstraints constraints = challengeConstraintChecker.challengeConstraintsHttp(requestContext, account);
+    if (!constraints.pushPermitted()) {
       return Response.status(429).build();
     }
     try {
-      rateLimitChallengeManager.sendPushChallenge(auth.getAccount());
+      rateLimitChallengeManager.sendPushChallenge(account);
       return Response.status(200).build();
     } catch (final NotPushRegisteredException e) {
       return Response.status(404).build();

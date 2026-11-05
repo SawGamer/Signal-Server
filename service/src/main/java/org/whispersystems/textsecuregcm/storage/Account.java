@@ -4,36 +4,52 @@
  */
 package org.whispersystems.textsecuregcm.storage;
 
+import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
 import com.fasterxml.jackson.annotation.JsonFilter;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tags;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-import java.util.function.Predicate;
+import java.util.stream.IntStream;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.signal.libsignal.protocol.IdentityKey;
+import org.signal.libsignal.zkgroup.ZkCredentialPublicKey;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
 import org.whispersystems.textsecuregcm.auth.StoredRegistrationLock;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
-import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64UrlAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
+import org.whispersystems.textsecuregcm.util.ZkCredentialPublicKeyAdapter;
 
 @JsonFilter("Account")
 public class Account {
+
+  public static final int MAX_MFA_KEY_ID = Byte.MAX_VALUE;
 
   private static final Logger logger = LoggerFactory.getLogger(Account.class);
 
@@ -41,9 +57,11 @@ public class Account {
   private UUID uuid;
 
   @JsonProperty("pni")
+  @Nullable
   private UUID phoneNumberIdentifier;
 
   @JsonProperty
+  @Nullable
   private String number;
 
   @JsonProperty
@@ -77,10 +95,12 @@ public class Account {
   @JsonProperty("pniIdentityKey")
   @JsonSerialize(using = IdentityKeyAdapter.Serializer.class)
   @JsonDeserialize(using = IdentityKeyAdapter.Deserializer.class)
+  @Nullable
   private IdentityKey phoneNumberIdentityKey;
 
   @JsonProperty("cpv")
-  private String currentProfileVersion;
+  @JsonDeserialize(using = ProfileVersionAdapter.Deserializing.class)
+  private byte[] currentProfileVersion;
 
   @JsonProperty
   private List<AccountBadge> badges = new ArrayList<>();
@@ -92,6 +112,7 @@ public class Account {
   private String registrationLockSalt;
 
   @JsonProperty("uak")
+  @Nullable
   private byte[] unidentifiedAccessKey;
 
   @JsonProperty("uua")
@@ -101,45 +122,87 @@ public class Account {
   private boolean discoverableByPhoneNumber = true;
 
   @JsonProperty("bcr")
-  private byte[] backupCredentialRequest;
+  @Nullable
+  private byte[] messagesBackupCredentialRequest;
+
+  @JsonProperty("mbcr")
+  @Nullable
+  private byte[] mediaBackupCredentialRequest;
+
+  @JsonProperty("bv")
+  @Nullable
+  private BackupVoucher backupVoucher;
+
+  @JsonProperty("zck")
+  @Nullable
+  @JsonSerialize(using = ZkCredentialPublicKeyAdapter.Serializer.class)
+  @JsonDeserialize(using = ZkCredentialPublicKeyAdapter.Deserializer.class)
+  private ZkCredentialPublicKey zkCredentialKey;
+
+  @JsonProperty("zckr")
+  @Nullable
+  private Long zkCredentialKeyRotationId;
 
   @JsonProperty
   private int version;
 
+  @JsonProperty("holds")
+  private List<UsernameHold> usernameHolds = Collections.emptyList();
+
+  @JsonProperty("arps")
+  @Nullable
+  private String accountRecoveryPasswordSalt;
+
+  @JsonProperty("arph")
+  @Nullable
+  private String accountRecoveryPasswordHash;
+
+  @JsonProperty("acs")
+  @Nullable
+  private byte[] authCredentialSalt;
+
+  @JsonProperty("pendingTotp")
+  @Nullable
+  private TotpKey pendingTotpKey;
+
+  @JsonProperty("mfa")
+  private Map<Byte, AnnotatedMfaKey> mfaKeys = Collections.emptyMap();
+
   @JsonIgnore
   private boolean stale;
 
-  public UUID getIdentifier(final IdentityType identityType) {
-    return switch (identityType) {
-      case ACI -> getUuid();
-      case PNI -> getPhoneNumberIdentifier();
-    };
-  }
+  public record UsernameHold(@JsonProperty("uh") byte[] usernameHash, @JsonProperty("e") long expirationSecs) {}
 
-  public UUID getUuid() {
+  public record BackupVoucher(@JsonProperty("rl") long receiptLevel, @JsonProperty("e") Instant expiration) {}
+
+  /// Returns the core account identifier (ACI) for this account. An account's core identifier never changes.
+  ///
+  /// @return the core account identifier for this account
+  public UUID getAccountIdentifier() {
     // this is the one method that may be called on a stale account
     return uuid;
   }
 
-  public void setUuid(final UUID uuid) {
+  public void setAccountIdentifier(final UUID accountIdentifier) {
     requireNotStale();
 
-    this.uuid = uuid;
+    this.uuid = accountIdentifier;
   }
 
-  public UUID getPhoneNumberIdentifier() {
+  /// Returns the phone number identifier for this account or empty if this account does not have a phone number.
+  ///
+  /// @return the phone number identifier for this account or empty if this account does not have a phone number
+  public Optional<UUID> getPhoneNumberIdentifier() {
     requireNotStale();
 
-    return phoneNumberIdentifier;
+    return Optional.ofNullable(phoneNumberIdentifier);
   }
 
-  /**
-   * Tests whether this account's account identifier or phone number identifier (depending on the given service
-   * identifier's identity type) matches the given service identifier.
-   *
-   * @param serviceIdentifier the identifier to test
-   * @return {@code true} if this account's identifier or phone number identifier matches
-   */
+  /// Tests whether this account's account identifier or phone number identifier (depending on the given service
+  /// identifier's identity type) matches the given service identifier.
+  ///
+  /// @param serviceIdentifier the identifier to test
+  /// @return `true` if this account's identifier or phone number identifier matches
   public boolean isIdentifiedBy(final ServiceIdentifier serviceIdentifier) {
     return switch (serviceIdentifier.identityType()) {
       case ACI -> serviceIdentifier.uuid().equals(uuid);
@@ -147,10 +210,13 @@ public class Account {
     };
   }
 
-  public String getNumber() {
+  /// Returns the phone number for this account or empty if this account does not have a phone number.
+  ///
+  /// @return the phone number for this account or empty if this account does not have a phone number
+  public Optional<String> getNumber() {
     requireNotStale();
 
-    return number;
+    return Optional.ofNullable(number);
   }
 
   public void setNumber(final String number, final UUID phoneNumberIdentifier) {
@@ -248,40 +314,15 @@ public class Account {
     return devices.stream().filter(device -> device.getId() == deviceId).findFirst();
   }
 
-  public boolean isStorageSupported() {
+  public boolean hasCapability(final DeviceCapability capability) {
     requireNotStale();
 
-    return devices.stream().anyMatch(device -> device.getCapabilities() != null && device.getCapabilities().storage());
-  }
-
-  public boolean isTransferSupported() {
-    requireNotStale();
-
-    return Optional.ofNullable(getPrimaryDevice().getCapabilities())
-        .map(Device.DeviceCapabilities::transfer)
-        .orElse(false);
-  }
-
-  public boolean isPniSupported() {
-    return allEnabledDevicesHaveCapability(DeviceCapabilities::pni);
-  }
-
-  public boolean isPaymentActivationSupported() {
-    return allEnabledDevicesHaveCapability(DeviceCapabilities::paymentActivation);
-  }
-
-  private boolean allEnabledDevicesHaveCapability(final Predicate<DeviceCapabilities> predicate) {
-    requireNotStale();
-
-    return devices.stream()
-        .filter(Device::isEnabled)
-        .allMatch(device -> device.getCapabilities() != null && predicate.test(device.getCapabilities()));
-  }
-
-  public boolean isEnabled() {
-    requireNotStale();
-
-    return getPrimaryDevice().isEnabled();
+    return switch (capability.getAccountCapabilityMode()) {
+      case PRIMARY_DEVICE -> getPrimaryDevice().hasCapability(capability);
+      case ANY_DEVICE -> devices.stream().anyMatch(device -> device.hasCapability(capability));
+      case ALL_DEVICES -> devices.stream().allMatch(device -> device.hasCapability(capability));
+      case ALWAYS_CAPABLE -> true;
+    };
   }
 
   public byte getNextDeviceId() {
@@ -300,30 +341,35 @@ public class Account {
     return candidateId;
   }
 
-  public boolean hasEnabledLinkedDevice() {
-    requireNotStale();
-
-    return devices.stream()
-        .filter(d -> Device.PRIMARY_ID != d.getId())
-        .anyMatch(Device::isEnabled);
-  }
-
   public void setIdentityKey(final IdentityKey identityKey) {
     requireNotStale();
 
     this.identityKey = identityKey;
   }
 
-  public IdentityKey getIdentityKey(final IdentityType identityType) {
+  /// Returns an identity key for the ACI identity for this account.
+  public IdentityKey getAccountIdentityKey() {
     requireNotStale();
-
-    return switch (identityType) {
-      case ACI -> identityKey;
-      case PNI -> phoneNumberIdentityKey;
-    };
+    return identityKey;
   }
 
+  /// Returns an identity key for the phone-number identity for this account, if it has such an identity.
+  ///
+  /// @return the identity key for the PNI identity for the account if it has one, or an empty `Optional` otherwise.
+  public Optional<IdentityKey> getPhoneNumberIdentityKey() {
+    requireNotStale();
+    return Optional.ofNullable(phoneNumberIdentityKey);
+  }
+
+  /// Sets the identity key for the phone-number identity of this account.
+  ///
+  /// @throws IllegalStateException if the account does not have a phone number identifier.
   public void setPhoneNumberIdentityKey(final IdentityKey phoneNumberIdentityKey) {
+    requireNotStale();
+
+    if (this.phoneNumberIdentifier == null) {
+      throw new IllegalStateException();
+    }
     this.phoneNumberIdentityKey = phoneNumberIdentityKey;
   }
 
@@ -335,13 +381,13 @@ public class Account {
         .orElse(0L);
   }
 
-  public Optional<String> getCurrentProfileVersion() {
+  public Optional<byte[]> getCurrentProfileVersion() {
     requireNotStale();
 
     return Optional.ofNullable(currentProfileVersion);
   }
 
-  public void setCurrentProfileVersion(final String currentProfileVersion) {
+  public void setCurrentProfileVersion(final byte[] currentProfileVersion) {
     requireNotStale();
 
     this.currentProfileVersion = currentProfileVersion;
@@ -366,7 +412,7 @@ public class Account {
     boolean added = false;
     for (int i = 0; i < badges.size(); i++) {
       final AccountBadge badgeInList = badges.get(i);
-      if (Objects.equals(badgeInList.getId(), badge.getId())) {
+      if (Objects.equals(badgeInList.id(), badge.id())) {
         if (added) {
           badges.remove(i);
           i--;
@@ -388,14 +434,14 @@ public class Account {
     requireNotStale();
 
     // early exit if it's already the first item in the list
-    if (!badges.isEmpty() && Objects.equals(badges.get(0).getId(), badgeId)) {
+    if (!badges.isEmpty() && Objects.equals(badges.get(0).id(), badgeId)) {
       purgeStaleBadges(clock);
       return;
     }
 
     int indexOfBadge = -1;
     for (int i = 1; i < badges.size(); i++) {
-      if (Objects.equals(badgeId, badges.get(i).getId())) {
+      if (Objects.equals(badgeId, badges.get(i).id())) {
         indexOfBadge = i;
         break;
       }
@@ -411,13 +457,13 @@ public class Account {
   public void removeBadge(final Clock clock, final String id) {
     requireNotStale();
 
-    badges.removeIf(accountBadge -> Objects.equals(accountBadge.getId(), id));
+    badges.removeIf(accountBadge -> Objects.equals(accountBadge.id(), id));
     purgeStaleBadges(clock);
   }
 
   private void purgeStaleBadges(final Clock clock) {
     final Instant now = clock.instant();
-    badges.removeIf(accountBadge -> now.isAfter(accountBadge.getExpiration()));
+    badges.removeIf(accountBadge -> now.isAfter(accountBadge.expiration()));
   }
 
   public void setRegistrationLockFromAttributes(final AccountAttributes attributes) {
@@ -429,8 +475,13 @@ public class Account {
     }
   }
 
-  public void setRegistrationLock(final String registrationLock, final String registrationLockSalt) {
+  public void setRegistrationLock(@Nullable final String registrationLock, @Nullable final String registrationLockSalt) {
     requireNotStale();
+
+    // Accounts without a phone number can't set a registration lock
+    if (number == null && (registrationLock != null || registrationLockSalt != null)) {
+      throw new IllegalArgumentException("Cannot set registration lock on account with no phone number");
+    }
 
     this.registrationLock     = registrationLock;
     this.registrationLockSalt = registrationLockSalt;
@@ -445,7 +496,9 @@ public class Account {
   public Optional<byte[]> getUnidentifiedAccessKey() {
     requireNotStale();
 
-    return Optional.ofNullable(unidentifiedAccessKey);
+    return Optional.ofNullable((unidentifiedAccessKey == null || unidentifiedAccessKey.length == 0)
+        ? null
+        : unidentifiedAccessKey);
   }
 
   public void setUnidentifiedAccessKey(final byte[] unidentifiedAccessKey) {
@@ -466,22 +519,23 @@ public class Account {
     this.unrestrictedUnidentifiedAccess = unrestrictedUnidentifiedAccess;
   }
 
+  /// Indicates whether this account may be discovered by its phone number via the contact discovery system (CDS).
+  ///
+  /// @return `true` if this account has a phone number and has opted into discovery by phone number or `false`
+  /// otherwise
+  ///
+  /// @see #getPhoneNumberIdentifier()
+  /// @see #setDiscoverableByPhoneNumber(boolean)
   public boolean isDiscoverableByPhoneNumber() {
     requireNotStale();
 
-    return this.discoverableByPhoneNumber;
+    return getPhoneNumberIdentifier().isPresent() && this.discoverableByPhoneNumber;
   }
 
   public void setDiscoverableByPhoneNumber(final boolean discoverableByPhoneNumber) {
     requireNotStale();
 
     this.discoverableByPhoneNumber = discoverableByPhoneNumber;
-  }
-
-  public boolean shouldBeVisibleInDirectory() {
-    requireNotStale();
-
-    return isEnabled() && isDiscoverableByPhoneNumber();
   }
 
   public int getVersion() {
@@ -496,41 +550,149 @@ public class Account {
     this.version = version;
   }
 
-  public byte[] getBackupCredentialRequest() {
-    return backupCredentialRequest;
+  public void setBackupCredentialRequests(final byte[] messagesBackupCredentialRequest,
+      final byte[] mediaBackupCredentialRequest) {
+
+    requireNotStale();
+
+    this.messagesBackupCredentialRequest = messagesBackupCredentialRequest;
+    this.mediaBackupCredentialRequest = mediaBackupCredentialRequest;
   }
 
-  public void setBackupCredentialRequest(final byte[] backupCredentialRequest) {
-    this.backupCredentialRequest = backupCredentialRequest;
+  public Optional<byte[]> getBackupCredentialRequest(final BackupCredentialType credentialType) {
+    requireNotStale();
+
+    return Optional.ofNullable(switch (credentialType) {
+      case MESSAGES -> messagesBackupCredentialRequest;
+      case MEDIA -> mediaBackupCredentialRequest;
+    });
   }
 
+  public @Nullable BackupVoucher getBackupVoucher() {
+    requireNotStale();
 
-  /**
-   * Have all this account's devices been manually locked?
-   *
-   * @see Device#hasLockedCredentials
-   *
-   * @return true if all the account's devices were locked, false otherwise.
-   */
+    return backupVoucher;
+  }
+
+  public void setBackupVoucher(final @Nullable BackupVoucher backupVoucher) {
+    requireNotStale();
+
+    this.backupVoucher = backupVoucher;
+  }
+
+  /// Have all this account's devices been manually locked?
+  ///
+  /// @see Device#hasLockedCredentials
+  ///
+  /// @return true if all the account's devices were locked, false otherwise.
   public boolean hasLockedCredentials() {
     return devices.stream().allMatch(Device::hasLockedCredentials);
   }
 
-  /**
-   * Lock account by invalidating authentication tokens.
-   *
-   * We only want to do this in cases where there is a potential conflict between the
-   * phone number holder and the registration lock holder. In that case, locking the
-   * account will ensure that either the registration lock holder proves ownership
-   * of the phone number, or after 7 days the phone number holder can register a new
-   * account.
-   */
+  /// Lock account by invalidating authentication tokens.
+  ///
+  /// We only want to do this in cases where there is a potential conflict between the
+  /// phone number holder and the registration lock holder. In that case, locking the
+  /// account will ensure that either the registration lock holder proves ownership
+  /// of the phone number, or after 7 days the phone number holder can register a new
+  /// account.
   public void lockAuthTokenHash() {
     devices.forEach(Device::lockAuthTokenHash);
   }
 
-  boolean isStale() {
-    return stale;
+  public List<UsernameHold> getUsernameHolds() {
+    return Collections.unmodifiableList(usernameHolds);
+  }
+
+  public void setUsernameHolds(final List<UsernameHold> usernameHolds) {
+    this.requireNotStale();
+    this.usernameHolds = usernameHolds;
+  }
+
+  public Optional<ZkCredentialPublicKey> getZkCredentialKey() {
+    return Optional.ofNullable(zkCredentialKey);
+  }
+
+  public void setZkCredentialKey(@Nullable final ZkCredentialPublicKey zkCredentialKey) {
+    this.zkCredentialKey = zkCredentialKey;
+  }
+
+  @Nullable
+  public Long getZkCredentialKeyRotationId() {
+    return zkCredentialKeyRotationId;
+  }
+
+  public void setZkCredentialKeyRotationId(@Nullable final Long zkCredentialKeyRotationId) {
+    this.zkCredentialKeyRotationId = zkCredentialKeyRotationId;
+  }
+
+  public Optional<SaltedTokenHash> getAccountRecoveryPassword() {
+    requireNotStale();
+
+    return accountRecoveryPasswordHash != null && accountRecoveryPasswordSalt != null
+        ? Optional.of(new SaltedTokenHash(accountRecoveryPasswordHash, accountRecoveryPasswordSalt))
+        : Optional.empty();
+  }
+
+  public void setAccountRecoveryPassword(final byte[] accountRecoveryPassword) {
+    requireNotStale();
+
+    setAccountRecoveryPassword(SaltedTokenHash.generateFor(HexFormat.of().formatHex(accountRecoveryPassword)));
+  }
+
+  public void setAccountRecoveryPassword(final SaltedTokenHash saltedAccountRecoveryPasswordHash) {
+    requireNotStale();
+
+    this.accountRecoveryPasswordSalt = saltedAccountRecoveryPasswordHash.salt();
+    this.accountRecoveryPasswordHash = saltedAccountRecoveryPasswordHash.hash();
+  }
+
+  public void clearAccountRecoveryPassword() {
+    requireNotStale();
+
+    this.accountRecoveryPasswordSalt = null;
+    this.accountRecoveryPasswordHash = null;
+  }
+
+  public Optional<byte[]> getAuthCredentialSalt() {
+    requireNotStale();
+    return Optional.ofNullable(authCredentialSalt);
+  }
+
+  public void setAuthCredentialSalt(final byte[] authCredentialSalt) {
+    requireNotStale();
+    this.authCredentialSalt = authCredentialSalt;
+  }
+
+  public void setPendingTotpKey(@Nullable final TotpKey pendingTotpKey) {
+    requireNotStale();
+    this.pendingTotpKey = pendingTotpKey;
+  }
+
+  public Optional<TotpKey> getPendingTotpKey() {
+    requireNotStale();
+    return Optional.ofNullable(pendingTotpKey);
+  }
+
+  public byte getNextMfaKeyId() {
+    requireNotStale();
+
+    final Set<Byte> usedKeys = new HashSet<>(mfaKeys.keySet());
+
+    return (byte) IntStream.range(0, MAX_MFA_KEY_ID + 1)
+        .filter(b -> !usedKeys.contains((byte) b))
+        .findFirst()
+        .orElseThrow(IllegalStateException::new);
+  }
+
+  public Map<Byte, AnnotatedMfaKey> getMfaKeys() {
+    requireNotStale();
+    return mfaKeys;
+  }
+
+  public void setMfaKeys(final Map<Byte, AnnotatedMfaKey> mfaKeys) {
+    requireNotStale();
+    this.mfaKeys = mfaKeys;
   }
 
   public void markStale() {
@@ -543,6 +705,23 @@ public class Account {
     //noinspection ConstantConditions
     if (stale) {
       logger.error("Accessor called on stale account", new RuntimeException());
+    }
+  }
+
+  private static class ProfileVersionAdapter {
+    private static class Deserializing extends JsonDeserializer<byte[]> {
+      private static final String CURRENT_PROFILE_VERSION_FORMAT_COUNTER_NAME = name(Account.class, "currentProfileMetricDeserialized");
+
+      @Override
+      public byte[] deserialize(JsonParser jsonParser, DeserializationContext deserializationContext) throws IOException {
+        final String val = jsonParser.getValueAsString();
+        Metrics.counter(CURRENT_PROFILE_VERSION_FORMAT_COUNTER_NAME, Tags.of("format", val.length() == 64 ? "hex" : "base64")).increment();
+        if (val.length() == 64) {
+          return HexFormat.of().parseHex(val);
+        } else {
+          return Base64.getDecoder().decode(val);
+        }
+      }
     }
   }
 }

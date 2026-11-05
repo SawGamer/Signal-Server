@@ -8,44 +8,55 @@ package org.whispersystems.textsecuregcm.currency;
 import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.lifecycle.Managed;
 import io.lettuce.core.SetArgs;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.entities.CurrencyConversionEntity;
 import org.whispersystems.textsecuregcm.entities.CurrencyConversionEntityList;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 
 public class CurrencyConversionManager implements Managed {
 
   private static final Logger logger = LoggerFactory.getLogger(CurrencyConversionManager.class);
 
+  private static final Duration FIXER_REFRESH_INTERVAL = Duration.ofMinutes(15);
   @VisibleForTesting
-  static final Duration FIXER_REFRESH_INTERVAL = Duration.ofHours(2);
+  static final String FIXER_SHARED_CACHE_CURRENT_KEY = "CurrencyConversionManager::FixerCacheCurrent";
+  private static final String FIXER_SHARED_CACHE_DATA_KEY = "CurrencyConversionManager::FixerCacheData";
 
-  private static final Duration COIN_MARKET_CAP_REFRESH_INTERVAL = Duration.ofMinutes(5);
-
+  private static final Duration COIN_GECKO_REFRESH_INTERVAL = Duration.ofMinutes(5);
   @VisibleForTesting
-  static final String COIN_MARKET_CAP_SHARED_CACHE_CURRENT_KEY = "CurrencyConversionManager::CoinMarketCapCacheCurrent";
+  static final String COIN_GECKO_SHARED_CACHE_CURRENT_KEY = "CurrencyConversionManager::CoinGeckoCacheCurrent";
+  private static final String COIN_GECKO_SHARED_CACHE_DATA_KEY = "CurrencyConversionManager::CoinGeckoCacheData";
 
-  private static final String COIN_MARKET_CAP_SHARED_CACHE_DATA_KEY = "CurrencyConversionManager::CoinMarketCapCacheData";
+  private static final String CACHED_DATA_UPDATED_COUNTER_NAME = MetricsUtil.name(CurrencyConversionManager.class, "cachedDataUpdate");
+  private static final String SOURCE_TAG_NAME = "source";
+
+  private static final Counter CACHED_DATA_UPDATE_ERRORS_COUNTER = Metrics.counter(
+      MetricsUtil.name(CurrencyConversionManager.class, "errors"));
 
   private final FixerClient fixerClient;
 
-  private final CoinMarketCapClient coinMarketCapClient;
+  private final CoinGeckoClient coinGeckoClient;
 
-  private final FaultTolerantRedisCluster cacheCluster;
+  private final FaultTolerantRedisClusterClient cacheCluster;
 
   private final Clock clock;
 
@@ -55,22 +66,21 @@ public class CurrencyConversionManager implements Managed {
 
   private final AtomicReference<CurrencyConversionEntityList> cached = new AtomicReference<>(null);
 
-  private Instant fixerUpdatedTimestamp = Instant.MIN;
-
   private Map<String, BigDecimal> cachedFixerValues;
 
-  private Map<String, BigDecimal> cachedCoinMarketCapValues;
+  private Map<String, BigDecimal> cachedCoinGeckoValues;
 
+  private ScheduledFuture<?> cacheUpdateFuture;
 
   public CurrencyConversionManager(
       final FixerClient fixerClient,
-      final CoinMarketCapClient coinMarketCapClient,
-      final FaultTolerantRedisCluster cacheCluster,
+      final CoinGeckoClient coinGeckoClient,
+      final FaultTolerantRedisClusterClient cacheCluster,
       final List<String> currencies,
       final ScheduledExecutorService executor,
       final Clock clock) {
     this.fixerClient = fixerClient;
-    this.coinMarketCapClient = coinMarketCapClient;
+    this.coinGeckoClient = coinGeckoClient;
     this.cacheCluster = cacheCluster;
     this.currencies  = currencies;
     this.executor = executor;
@@ -83,69 +93,37 @@ public class CurrencyConversionManager implements Managed {
 
   @Override
   public void start() throws Exception {
-    executor.scheduleAtFixedRate(() -> {
+    cacheUpdateFuture = executor.scheduleWithFixedDelay(() -> {
       try {
-        updateCacheIfNecessary();
+        update();
       } catch (Throwable t) {
+        CACHED_DATA_UPDATE_ERRORS_COUNTER.increment();
         logger.warn("Error updating currency conversions", t);
       }
     }, 0, 15, TimeUnit.SECONDS);
   }
 
+  @Override
+  public void stop() throws Exception {
+    if (cacheUpdateFuture != null) {
+      cacheUpdateFuture.cancel(true);
+    }
+  }
+
   @VisibleForTesting
-  void updateCacheIfNecessary() throws IOException {
-    if (Duration.between(fixerUpdatedTimestamp, clock.instant()).abs().compareTo(FIXER_REFRESH_INTERVAL) >= 0 || cachedFixerValues == null) {
-      this.cachedFixerValues = new HashMap<>(fixerClient.getConversionsForBase("USD"));
-      this.fixerUpdatedTimestamp = clock.instant();
-    }
+  void update() throws IOException {
+    updateFixerCacheIfNecessary();
+    updateCoinGeckoCacheIfNecessary();
+    updateEntity();
+  }
 
-    {
-      final Map<String, BigDecimal> coinMarketCapValuesFromSharedCache = cacheCluster.withCluster(connection -> {
-        final Map<String, BigDecimal> parsedSharedCacheData = new HashMap<>();
+  private void updateEntity() {
+    final List<CurrencyConversionEntity> entities = new ArrayList<>(cachedCoinGeckoValues.size());
 
-        connection.sync().hgetall(COIN_MARKET_CAP_SHARED_CACHE_DATA_KEY).forEach((currency, conversionRate) ->
-            parsedSharedCacheData.put(currency, new BigDecimal(conversionRate)));
+    for (Map.Entry<String, BigDecimal> currency : cachedCoinGeckoValues.entrySet()) {
+      final BigDecimal usdValue = stripTrailingZerosAfterDecimal(currency.getValue());
 
-        return parsedSharedCacheData;
-      });
-
-      if (coinMarketCapValuesFromSharedCache != null && !coinMarketCapValuesFromSharedCache.isEmpty()) {
-        cachedCoinMarketCapValues = coinMarketCapValuesFromSharedCache;
-      }
-    }
-
-    final boolean shouldUpdateSharedCache = cacheCluster.withCluster(connection ->
-        "OK".equals(connection.sync().set(COIN_MARKET_CAP_SHARED_CACHE_CURRENT_KEY,
-            "true",
-            SetArgs.Builder.nx().ex(COIN_MARKET_CAP_REFRESH_INTERVAL))));
-
-    if (shouldUpdateSharedCache || cachedCoinMarketCapValues == null) {
-      final Map<String, BigDecimal> conversionRatesFromCoinMarketCap = new HashMap<>(currencies.size());
-
-      for (final String currency : currencies) {
-        conversionRatesFromCoinMarketCap.put(currency, coinMarketCapClient.getSpotPrice(currency, "USD"));
-      }
-
-      cachedCoinMarketCapValues = conversionRatesFromCoinMarketCap;
-
-      if (shouldUpdateSharedCache) {
-        cacheCluster.useCluster(connection -> {
-          final Map<String, String> sharedCoinMarketCapValues = new HashMap<>();
-
-          cachedCoinMarketCapValues.forEach((currency, conversionRate) ->
-              sharedCoinMarketCapValues.put(currency, conversionRate.toString()));
-
-          connection.sync().hset(COIN_MARKET_CAP_SHARED_CACHE_DATA_KEY, sharedCoinMarketCapValues);
-        });
-      }
-    }
-
-    List<CurrencyConversionEntity> entities = new LinkedList<>();
-
-    for (Map.Entry<String, BigDecimal> currency : cachedCoinMarketCapValues.entrySet()) {
-      BigDecimal usdValue = stripTrailingZerosAfterDecimal(currency.getValue());
-
-      Map<String, BigDecimal> values = new HashMap<>();
+      final Map<String, BigDecimal> values = new HashMap<>();
       values.put("USD", usdValue);
 
       for (Map.Entry<String, BigDecimal> conversion : cachedFixerValues.entrySet()) {
@@ -158,6 +136,83 @@ public class CurrencyConversionManager implements Managed {
     this.cached.set(new CurrencyConversionEntityList(entities, clock.millis()));
   }
 
+  private void updateFixerCacheIfNecessary() throws IOException {
+    {
+      final Map<String, BigDecimal> fixerValuesFromSharedCache = getCachedData(FIXER_SHARED_CACHE_DATA_KEY);
+
+      if (fixerValuesFromSharedCache != null && !fixerValuesFromSharedCache.isEmpty()) {
+        cachedFixerValues = fixerValuesFromSharedCache;
+      }
+    }
+
+    final boolean shouldUpdateSharedCache = shouldUpdateSharedCache(FIXER_SHARED_CACHE_CURRENT_KEY,
+        FIXER_REFRESH_INTERVAL);
+
+    if (shouldUpdateSharedCache || cachedFixerValues == null) {
+
+      cachedFixerValues = new HashMap<>(fixerClient.getConversionsForBase("USD"));
+
+      if (shouldUpdateSharedCache) {
+        updateCachedData(FIXER_SHARED_CACHE_DATA_KEY, cachedFixerValues);
+        Metrics.counter(CACHED_DATA_UPDATED_COUNTER_NAME, SOURCE_TAG_NAME, "fixer").increment();
+      }
+    }
+  }
+
+  private void updateCoinGeckoCacheIfNecessary() throws IOException {
+    {
+      final Map<String, BigDecimal> coinGeckoValuesFromSharedCache = getCachedData(COIN_GECKO_SHARED_CACHE_DATA_KEY);
+
+      if (coinGeckoValuesFromSharedCache != null && !coinGeckoValuesFromSharedCache.isEmpty()) {
+        cachedCoinGeckoValues = coinGeckoValuesFromSharedCache;
+      }
+    }
+
+    final boolean shouldUpdateSharedCache = shouldUpdateSharedCache(COIN_GECKO_SHARED_CACHE_CURRENT_KEY,
+        COIN_GECKO_REFRESH_INTERVAL);
+
+    if (shouldUpdateSharedCache || cachedCoinGeckoValues == null) {
+      final Map<String, BigDecimal> conversionRatesFromCoinGecko = new HashMap<>(currencies.size());
+
+      for (final String currency : currencies) {
+        conversionRatesFromCoinGecko.put(currency, coinGeckoClient.getSpotPrice(currency, "USD"));
+      }
+
+      cachedCoinGeckoValues = conversionRatesFromCoinGecko;
+
+      if (shouldUpdateSharedCache) {
+        updateCachedData(COIN_GECKO_SHARED_CACHE_DATA_KEY, cachedCoinGeckoValues);
+        Metrics.counter(CACHED_DATA_UPDATED_COUNTER_NAME, SOURCE_TAG_NAME, "coingecko").increment();
+      }
+    }
+  }
+
+  private Map<String, BigDecimal> getCachedData(final String cacheKey) {
+    return cacheCluster.withCluster(connection -> {
+      final Map<String, BigDecimal> parsedSharedCacheData = new HashMap<>();
+
+      connection.sync().hgetall(cacheKey).forEach((currency, conversionRate) ->
+          parsedSharedCacheData.put(currency, new BigDecimal(conversionRate)));
+
+      return parsedSharedCacheData;
+    });
+  }
+
+  private boolean shouldUpdateSharedCache(final String cacheKey, final Duration interval) {
+    return cacheCluster.withCluster(connection ->
+        "OK".equals(connection.sync().set(cacheKey, "true", SetArgs.Builder.nx().ex(interval))));
+  }
+
+  private void updateCachedData(final String cacheKey, final Map<String, BigDecimal> data) {
+    cacheCluster.useCluster(connection -> {
+      final Map<String, String> sharedValues = new HashMap<>();
+
+      data.forEach((currency, conversionRate) -> sharedValues.put(currency, conversionRate.toString()));
+
+      connection.sync().hset(cacheKey, sharedValues);
+    });
+  }
+
   private BigDecimal stripTrailingZerosAfterDecimal(BigDecimal bigDecimal) {
     BigDecimal n = bigDecimal.stripTrailingZeros();
     if (n.scale() < 0) {
@@ -165,5 +220,19 @@ public class CurrencyConversionManager implements Managed {
     } else {
       return n;
     }
+  }
+
+  @VisibleForTesting
+  void setCachedFixerValues(final Map<String, BigDecimal> cachedFixerValues) {
+    this.cachedFixerValues = cachedFixerValues;
+  }
+
+  public Optional<BigDecimal> convertToUsd(final BigDecimal amount, final String currency) {
+    if ("USD".equalsIgnoreCase(currency)) {
+      return Optional.of(amount);
+    }
+
+    return Optional.ofNullable(cachedFixerValues.get(currency.toUpperCase(Locale.ROOT)))
+        .map(conversionRate -> amount.divide(conversionRate, 2, RoundingMode.HALF_EVEN));
   }
 }

@@ -1,7 +1,10 @@
 package org.whispersystems.textsecuregcm.util;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import java.util.concurrent.CompletionException;
 import java.util.function.Function;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
 
 public final class ExceptionUtils {
 
@@ -44,8 +47,8 @@ public final class ExceptionUtils {
    *
    * @param exceptionType The class of exception that will be handled
    * @param fn            A function that handles exceptions of type exceptionType
-   * @param <T> The type of the stage that will be mapped
-   * @param <E> The type of the exception that will be handled
+   * @param <T>           The type of the stage that will be mapped
+   * @param <E>           The type of the exception that will be handled
    * @return A function suitable for use with {@link java.util.concurrent.CompletionStage#exceptionally}
    */
   public static <T, E extends Throwable> Function<Throwable, ? extends T> exceptionallyHandler(
@@ -61,5 +64,84 @@ public final class ExceptionUtils {
       }
       throw wrap(anyException);
     };
+  }
+
+  /**
+   * Create a handler suitable for use with {@link java.util.concurrent.CompletionStage#exceptionally} that converts
+   * exceptions of a specific type to another type.
+   *
+   * @param exceptionType The class of exception that will be handled
+   * @param fn            A function that marshals exceptions of type E to type F
+   * @param <T>           The type of the stage that will be mapped
+   * @param <E>           The type of the exception that will be handled
+   * @param <F>           The type of the exception that will be produced
+   * @return A function suitable for use with {@link java.util.concurrent.CompletionStage#exceptionally}
+   */
+  public static <T, E extends Throwable, F extends Throwable> Function<Throwable, ? extends T> marshal(
+      final Class<E> exceptionType,
+      final Function<E, F> fn) {
+    return exceptionallyHandler(exceptionType, e -> {
+      throw wrap(fn.apply(e));
+    });
+  }
+
+  /**
+   * Runs the supplier, throwing a checked exception if the supplier throws an exception that unwraps to the provided type
+   *
+   * @param exType The exception type to check for
+   * @param supplier A supplier that produces a T
+   * @return The result of the supplier
+   * @param <T> The supplier type
+   * @param <E> The checked exception type
+   * @throws E If the supplier throws E or a type that {@link #unwrap}s to E
+   */
+  public static <T, E extends Throwable> T unwrapSupply(Class<E> exType, Supplier<T> supplier) throws E {
+    try {
+      return supplier.get();
+    } catch (RuntimeException e) {
+      final Throwable ex = unwrap(e);
+      if (exType.isInstance(ex)) {
+        throw exType.cast(ex);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Runs the supplier, throwing a checked exception if the supplier throws an exception that unwraps to the provided type
+   *
+   * @param exType The exception type to check for
+   * @param supplier A supplier that produces a T
+   * @param marshal A function that maps from the thrown type to another exception type
+   * @return The result of the supplier
+   * @param <T> The supplier type
+   * @param <E> The checked exception type that may be thrown from supplier
+   * @throws F If the supplier throws E or a type that {@link #unwrap}s to E
+   */
+  public static <T, E extends Throwable, F extends Throwable> T unwrapSupply(Class<E> exType, Supplier<T> supplier, Function<E, F> marshal) throws F {
+    try {
+      return supplier.get();
+    } catch (RuntimeException e) {
+      final Throwable ex = unwrap(e);
+      if (exType.isInstance(ex)) {
+        throw marshal.apply(exType.cast(ex));
+      }
+      throw e;
+    }
+  }
+
+  /// Checks whether an exception in the chain is a [CallNotPermittedException].
+  ///
+  /// This is useful to check when logging, to avoid repetitive output.
+  public static boolean isBreakerOpen(@Nullable Throwable t) {
+    if (t == null) {
+      return false;
+    }
+
+    while (!(t instanceof CallNotPermittedException) && t.getCause() != null) {
+      t = t.getCause();
+    }
+
+    return t instanceof CallNotPermittedException;
   }
 }
